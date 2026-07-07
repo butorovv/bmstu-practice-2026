@@ -1,0 +1,12 @@
+services:
+  ingestion:
+    build:
+      context: .
+      dockerfile: deployments/docker/ingestion.Dockerfile
+    image: bmstu-practice-ingestion:local
+    container_name: ingestion-service
+    environment:
+      HTTP_ADDR: ":8080"
+      PUBLISHER_BACKEND: "log"
+    ports:
+      - "8080:8080"
