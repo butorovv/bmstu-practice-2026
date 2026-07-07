@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+
+bin/
+ingestion
+coverage.out
+*.test
+
+README.md
+contracts/
+deployments/
+migrations/
