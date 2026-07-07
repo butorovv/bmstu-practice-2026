@@ -10,3 +10,14 @@ services:
       PUBLISHER_BACKEND: "log"
     ports:
       - "8080:8080"
+
+  processing:
+    build:
+      context: .
+      dockerfile: deployments/docker/processing.Dockerfile
+    image: bmstu-practice-processing:local
+    container_name: processing-service
+    env_file:
+      - configs/processing.env.example
+    ports:
+      - "8081:8081"
