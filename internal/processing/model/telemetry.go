@@ -3,8 +3,10 @@ package model
 import "time"
 
 const (
-	AlertTypeHighHeartRate    = "HIGH_HEART_RATE"
-	AlertMessageHighHeartRate = "Patient has high heart rate"
+	AlertTypeHighHeartRate = "HIGH_HEART_RATE"
+	HighHeartRateMessage   = "Patient has high heart rate"
+
+	AlertMessageHighHeartRate = HighHeartRateMessage
 )
 
 type TelemetryEvent struct {
@@ -16,6 +18,7 @@ type TelemetryEvent struct {
 }
 
 type Alert struct {
+	ID          int64     `json:"id"`
 	PatientID   string    `json:"patient_id"`
 	Type        string    `json:"type"`
 	Message     string    `json:"message"`
