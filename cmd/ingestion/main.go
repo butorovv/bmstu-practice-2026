@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
@@ -16,8 +17,20 @@ import (
 func main() {
 	cfg := config.Load()
 
+	pub, err := newPublisher(cfg)
+	if err != nil {
+		log.Fatalf("configure publisher: %v", err)
+	}
+	if closer, ok := pub.(interface{ Close() error }); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("close publisher: %v", err)
+			}
+		}()
+	}
+
 	handler := delivery.NewHandler(
-		newPublisher(cfg),
+		pub,
 		validator.New(),
 	)
 	server := &http.Server{
@@ -48,12 +61,13 @@ func main() {
 	log.Print("ingestion service stopped")
 }
 
-func newPublisher(cfg config.Config) publisher.Publisher {
+func newPublisher(cfg config.Config) (publisher.Publisher, error) {
 	switch cfg.PublisherBackend {
 	case "", config.DefaultPublisherBackend:
-		return publisher.NewLogPublisher()
+		return publisher.NewLogPublisher(), nil
+	case "kafka":
+		return publisher.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaPublishTimeout)
 	default:
-		log.Printf("unknown PUBLISHER_BACKEND=%q, falling back to log publisher", cfg.PublisherBackend)
-		return publisher.NewLogPublisher()
+		return nil, fmt.Errorf("unsupported PUBLISHER_BACKEND %q", cfg.PublisherBackend)
 	}
 }
