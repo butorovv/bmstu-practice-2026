@@ -53,8 +53,8 @@ func TestDetectorDetect(t *testing.T) {
 			if alert.Type != model.AlertTypeHighHeartRate {
 				t.Fatalf("alert type = %q, want %q", alert.Type, model.AlertTypeHighHeartRate)
 			}
-			if alert.Message != model.AlertMessageHighHeartRate {
-				t.Fatalf("alert message = %q, want %q", alert.Message, model.AlertMessageHighHeartRate)
+			if alert.Message != model.HighHeartRateMessage {
+				t.Fatalf("alert message = %q, want %q", alert.Message, model.HighHeartRateMessage)
 			}
 			if !alert.TriggeredAt.Equal(event.Timestamp) {
 				t.Fatalf("alert triggered_at = %v, want %v", alert.TriggeredAt, event.Timestamp)

@@ -8,13 +8,15 @@ import (
 	"syscall"
 
 	processinghttp "github.com/butorovv/bmstu-practice-2026/internal/processing/delivery/http"
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/storage"
 	"github.com/butorovv/bmstu-practice-2026/internal/shared/config"
 )
 
 func main() {
 	cfg := config.LoadProcessing()
 
-	handler := processinghttp.NewHandler()
+	alertRepo := storage.NewInMemoryAlertRepository()
+	handler := processinghttp.NewHandler(alertRepo)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
 		Handler: processinghttp.NewRouter(handler),

@@ -20,7 +20,7 @@ func (Detector) Detect(event model.TelemetryEvent) (model.Alert, bool) {
 	return model.Alert{
 		PatientID:   event.PatientID,
 		Type:        model.AlertTypeHighHeartRate,
-		Message:     model.AlertMessageHighHeartRate,
+		Message:     model.HighHeartRateMessage,
 		TriggeredAt: event.Timestamp,
 	}, true
 }
