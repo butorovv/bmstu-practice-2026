@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
@@ -9,17 +10,27 @@ import (
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/delivery"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/publisher"
+	redisrepo "github.com/butorovv/bmstu-practice-2026/internal/ingestion/repository/redis"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/validator"
 	"github.com/butorovv/bmstu-practice-2026/internal/shared/config"
 )
 
 func main() {
 	cfg := config.Load()
-	pub := newPublisher(cfg)
+	pub, err := newPublisher(cfg)
+	if err != nil {
+		log.Fatalf("failed to create publisher: %v", err)
+	}
+
+	redisClient := redisrepo.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	idempotencyRepository := redisrepo.NewIdempotencyRepository(redisClient)
+	rateLimiter := redisrepo.NewRateLimiter(redisClient)
 
 	handler := delivery.NewHandler(
 		pub,
 		validator.New(),
+		idempotencyRepository,
+		rateLimiter,
 	)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
@@ -48,20 +59,22 @@ func main() {
 	if err := closePublisher(pub); err != nil {
 		log.Printf("ingestion publisher close failed: %v", err)
 	}
+	if err := redisClient.Close(); err != nil {
+		log.Printf("ingestion redis client close failed: %v", err)
+	}
 
 	log.Print("ingestion service stopped")
 }
 
-func newPublisher(cfg config.Config) publisher.Publisher {
+func newPublisher(cfg config.Config) (publisher.Publisher, error) {
 	switch cfg.PublisherBackend {
 	case "", config.DefaultPublisherBackend:
-		return publisher.NewLogPublisher()
+		return publisher.NewLogPublisher(), nil
 	case "kafka":
-		log.Printf("using kafka publisher brokers=%v topic=%s", cfg.Kafka.Brokers, cfg.Kafka.TelemetryTopic)
-		return publisher.NewKafkaPublisher(cfg.Kafka.Brokers, cfg.Kafka.TelemetryTopic)
+		log.Printf("using kafka publisher brokers=%v topic=%s", cfg.KafkaBrokers, publisher.TelemetryRawTopic)
+		return publisher.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaPublishTimeout)
 	default:
-		log.Printf("unknown PUBLISHER_BACKEND=%q, falling back to log publisher", cfg.PublisherBackend)
-		return publisher.NewLogPublisher()
+		return nil, fmt.Errorf("unsupported PUBLISHER_BACKEND %q", cfg.PublisherBackend)
 	}
 }
 

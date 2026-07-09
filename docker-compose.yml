@@ -20,6 +20,12 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
   ingestion:
     build:
       context: .
@@ -28,11 +34,16 @@ services:
     container_name: ingestion-service
     depends_on:
       - kafka
+      - redis
     environment:
       HTTP_ADDR: ":8080"
       PUBLISHER_BACKEND: "kafka"
       KAFKA_BROKERS: "kafka:9092"
       KAFKA_TELEMETRY_TOPIC: "telemetry.raw"
+      KAFKA_PUBLISH_TIMEOUT: "5s"
+      REDIS_ADDR: "redis:6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: "0"
     ports:
       - "8080:8080"
 
