@@ -4,4 +4,5 @@
 *.test
 coverage.out
 
-README.md.gocache/
+README.md
+.gocache/
