@@ -12,7 +12,7 @@ const (
 	DefaultProcessingHTTPAddr  = ":8081"
 	DefaultShutdownTimeout     = 10 * time.Second
 	DefaultPublisherBackend    = "log"
-	DefaultKafkaBrokers        = "localhost:9092"
+	DefaultKafkaBrokers        = "localhost:29092"
 	DefaultKafkaTelemetryTopic = "telemetry.raw"
 	DefaultKafkaConsumerGroup  = "processing-service"
 	DefaultKafkaPublishTimeout = 5 * time.Second
