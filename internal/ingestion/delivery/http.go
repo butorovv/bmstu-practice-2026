@@ -1,10 +1,13 @@
 package delivery
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/publisher"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/usecase"
@@ -12,13 +15,19 @@ import (
 )
 
 type Handler struct {
-	publisher publisher.Publisher
-	validator validator.Validator
+	publisher   publisher.Publisher
+	validator   validator.Validator
+	idempotency usecase.IdempotencyRepository
+	rateLimiter usecase.RateLimiter
 }
 
 type acceptedResponse struct {
 	Status               string `json:"status"`
 	AcceptedMeasurements int    `json:"accepted_measurements"`
+}
+
+type duplicateIgnoredResponse struct {
+	Status string `json:"status"`
 }
 
 type errorResponse struct {
@@ -30,10 +39,19 @@ type healthResponse struct {
 	Status string `json:"status"`
 }
 
-func NewHandler(pub publisher.Publisher, val validator.Validator) *Handler {
+const idempotencyReleaseTimeout = time.Second
+
+func NewHandler(
+	pub publisher.Publisher,
+	val validator.Validator,
+	idempotency usecase.IdempotencyRepository,
+	rateLimiter usecase.RateLimiter,
+) *Handler {
 	return &Handler{
-		publisher: pub,
-		validator: val,
+		publisher:   pub,
+		validator:   val,
+		idempotency: idempotency,
+		rateLimiter: rateLimiter,
 	}
 }
 
@@ -63,9 +81,61 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reserved, err := h.idempotency.Reserve(r.Context(), batch.DeviceID, batch.BatchID)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"infrastructure_unavailable",
+			"required infrastructure is unavailable",
+		)
+		return
+	}
+	if !reserved {
+		writeJSON(w, http.StatusOK, duplicateIgnoredResponse{Status: "duplicate_ignored"})
+		return
+	}
+
+	rateLimit, err := h.rateLimiter.Allow(r.Context(), batch.DeviceID)
+	if err != nil {
+		_ = h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID)
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"infrastructure_unavailable",
+			"required infrastructure is unavailable",
+		)
+		return
+	}
+	if !rateLimit.Allowed {
+		if err := h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID); err != nil {
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"infrastructure_unavailable",
+				"required infrastructure is unavailable",
+			)
+			return
+		}
+
+		retryAfter := max(
+			int64((rateLimit.RetryAfter+time.Second-1)/time.Second),
+			1,
+		)
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"rate_limit_exceeded",
+			"device rate limit exceeded",
+		)
+		return
+	}
+
 	events := usecase.BuildEvents(batch)
 	for _, event := range events {
 		if err := h.publisher.Publish(r.Context(), event); err != nil {
+			_ = h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID)
 			writeError(w, http.StatusServiceUnavailable, "publisher_unavailable", "publisher is unavailable")
 			return
 		}
@@ -79,6 +149,20 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+}
+
+func (h *Handler) releaseIdempotency(
+	ctx context.Context,
+	deviceID string,
+	batchID string,
+) error {
+	releaseCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		idempotencyReleaseTimeout,
+	)
+	defer cancel()
+
+	return h.idempotency.Release(releaseCtx, deviceID, batchID)
 }
 
 func writeError(w http.ResponseWriter, statusCode int, code string, message string) {

@@ -46,6 +46,17 @@ services:
       - --replication-factor
       - "1"
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   ingestion:
     build:
       context: .
@@ -57,9 +68,14 @@ services:
       PUBLISHER_BACKEND: "kafka"
       KAFKA_BROKERS: "kafka:19092"
       KAFKA_PUBLISH_TIMEOUT: "5s"
+      REDIS_ADDR: "redis:6379"
+      REDIS_PASSWORD: ""
+      REDIS_DB: "0"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     ports:
       - "8080:8080"
 

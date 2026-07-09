@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,6 +14,7 @@ const (
 	DefaultPublisherBackend    = "log"
 	DefaultKafkaBrokers        = "localhost:9092"
 	DefaultKafkaPublishTimeout = 5 * time.Second
+	DefaultRedisAddr           = "localhost:6379"
 )
 
 type Config struct {
@@ -21,6 +23,9 @@ type Config struct {
 	PublisherBackend    string
 	KafkaBrokers        []string
 	KafkaPublishTimeout time.Duration
+	RedisAddr           string
+	RedisPassword       string
+	RedisDB             int
 }
 
 type ProcessingConfig struct {
@@ -35,6 +40,9 @@ func Load() Config {
 		PublisherBackend:    getEnv("PUBLISHER_BACKEND", DefaultPublisherBackend),
 		KafkaBrokers:        splitCSV(getEnv("KAFKA_BROKERS", DefaultKafkaBrokers)),
 		KafkaPublishTimeout: getDurationEnv("KAFKA_PUBLISH_TIMEOUT", DefaultKafkaPublishTimeout),
+		RedisAddr:           getEnv("REDIS_ADDR", DefaultRedisAddr),
+		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
+		RedisDB:             getIntEnv("REDIS_DB", 0),
 	}
 }
 
@@ -66,6 +74,20 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 	}
 
 	return duration
+}
+
+func getIntEnv(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 0 {
+		return fallback
+	}
+
+	return number
 }
 
 func splitCSV(value string) []string {
