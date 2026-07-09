@@ -13,6 +13,8 @@ const (
 	DefaultShutdownTimeout     = 10 * time.Second
 	DefaultPublisherBackend    = "log"
 	DefaultKafkaBrokers        = "localhost:9092"
+	DefaultKafkaTelemetryTopic = "telemetry.raw"
+	DefaultKafkaConsumerGroup  = "processing-service"
 	DefaultKafkaPublishTimeout = 5 * time.Second
 	DefaultRedisAddr           = "localhost:6379"
 )
@@ -21,6 +23,7 @@ type Config struct {
 	HTTPAddr            string
 	ShutdownTimeout     time.Duration
 	PublisherBackend    string
+	Kafka               KafkaConfig
 	KafkaBrokers        []string
 	KafkaPublishTimeout time.Duration
 	RedisAddr           string
@@ -31,14 +34,24 @@ type Config struct {
 type ProcessingConfig struct {
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
+	Kafka           KafkaConfig
+}
+
+type KafkaConfig struct {
+	Brokers        []string
+	TelemetryTopic string
+	ConsumerGroup  string
 }
 
 func Load() Config {
+	kafkaConfig := loadKafkaConfig()
+
 	return Config{
 		HTTPAddr:            getEnv("HTTP_ADDR", DefaultHTTPAddr),
 		ShutdownTimeout:     DefaultShutdownTimeout,
 		PublisherBackend:    getEnv("PUBLISHER_BACKEND", DefaultPublisherBackend),
-		KafkaBrokers:        splitCSV(getEnv("KAFKA_BROKERS", DefaultKafkaBrokers)),
+		Kafka:               kafkaConfig,
+		KafkaBrokers:        kafkaConfig.Brokers,
 		KafkaPublishTimeout: getDurationEnv("KAFKA_PUBLISH_TIMEOUT", DefaultKafkaPublishTimeout),
 		RedisAddr:           getEnv("REDIS_ADDR", DefaultRedisAddr),
 		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
@@ -50,6 +63,7 @@ func LoadProcessing() ProcessingConfig {
 	return ProcessingConfig{
 		HTTPAddr:        getEnv("PROCESSING_HTTP_ADDR", DefaultProcessingHTTPAddr),
 		ShutdownTimeout: DefaultShutdownTimeout,
+		Kafka:           loadKafkaConfig(),
 	}
 }
 
@@ -60,6 +74,14 @@ func getEnv(key string, fallback string) string {
 	}
 
 	return value
+}
+
+func loadKafkaConfig() KafkaConfig {
+	return KafkaConfig{
+		Brokers:        splitCSV(getEnv("KAFKA_BROKERS", DefaultKafkaBrokers)),
+		TelemetryTopic: getEnv("KAFKA_TELEMETRY_TOPIC", getEnv("KAFKA_RAW_TOPIC", DefaultKafkaTelemetryTopic)),
+		ConsumerGroup:  getEnv("KAFKA_CONSUMER_GROUP", getEnv("KAFKA_GROUP_ID", DefaultKafkaConsumerGroup)),
+	}
 }
 
 func getDurationEnv(key string, fallback time.Duration) time.Duration {
@@ -98,6 +120,10 @@ func splitCSV(value string) []string {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
 			result = append(result, trimmed)
 		}
+	}
+
+	if len(result) == 0 {
+		return []string{DefaultKafkaBrokers}
 	}
 
 	return result

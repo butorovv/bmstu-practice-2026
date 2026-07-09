@@ -1,6 +1,7 @@
 .git
 .gitignore
 .dockerignore
+.gocache/
 
 bin/
 ingestion

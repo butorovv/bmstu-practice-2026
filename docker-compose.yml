@@ -1,61 +1,30 @@
 services:
   kafka:
-    image: apache/kafka:4.3.1
-    hostname: kafka
+    image: apache/kafka:3.7.0
     container_name: kafka
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT_HOST://localhost:9092,PLAINTEXT://kafka:19092"
+      KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
-      KAFKA_LISTENERS: "CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092"
-      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-
-  kafka-init:
-    image: apache/kafka:4.3.1
-    depends_on:
-      kafka:
-        condition: service_healthy
-    command:
-      - /opt/kafka/bin/kafka-topics.sh
-      - --bootstrap-server
-      - kafka:19092
-      - --create
-      - --if-not-exists
-      - --topic
-      - telemetry.raw
-      - --partitions
-      - "3"
-      - --replication-factor
-      - "1"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7-alpine
     container_name: redis
     ports:
       - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
 
   ingestion:
     build:
@@ -63,19 +32,18 @@ services:
       dockerfile: deployments/docker/ingestion.Dockerfile
     image: bmstu-practice-ingestion:local
     container_name: ingestion-service
+    depends_on:
+      - kafka
+      - redis
     environment:
       HTTP_ADDR: ":8080"
       PUBLISHER_BACKEND: "kafka"
-      KAFKA_BROKERS: "kafka:19092"
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_TELEMETRY_TOPIC: "telemetry.raw"
       KAFKA_PUBLISH_TIMEOUT: "5s"
       REDIS_ADDR: "redis:6379"
       REDIS_PASSWORD: ""
       REDIS_DB: "0"
-    depends_on:
-      kafka-init:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
     ports:
       - "8080:8080"
 
@@ -85,6 +53,8 @@ services:
       dockerfile: deployments/docker/processing.Dockerfile
     image: bmstu-practice-processing:local
     container_name: processing-service
+    depends_on:
+      - kafka
     env_file:
       - configs/processing.env.example
     ports:
