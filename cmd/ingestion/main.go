@@ -15,9 +15,10 @@ import (
 
 func main() {
 	cfg := config.Load()
+	pub := newPublisher(cfg)
 
 	handler := delivery.NewHandler(
-		newPublisher(cfg),
+		pub,
 		validator.New(),
 	)
 	server := &http.Server{
@@ -44,6 +45,9 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("ingestion service shutdown failed: %v", err)
 	}
+	if err := closePublisher(pub); err != nil {
+		log.Printf("ingestion publisher close failed: %v", err)
+	}
 
 	log.Print("ingestion service stopped")
 }
@@ -52,8 +56,22 @@ func newPublisher(cfg config.Config) publisher.Publisher {
 	switch cfg.PublisherBackend {
 	case "", config.DefaultPublisherBackend:
 		return publisher.NewLogPublisher()
+	case "kafka":
+		log.Printf("using kafka publisher brokers=%v topic=%s", cfg.Kafka.Brokers, cfg.Kafka.TelemetryTopic)
+		return publisher.NewKafkaPublisher(cfg.Kafka.Brokers, cfg.Kafka.TelemetryTopic)
 	default:
 		log.Printf("unknown PUBLISHER_BACKEND=%q, falling back to log publisher", cfg.PublisherBackend)
 		return publisher.NewLogPublisher()
 	}
+}
+
+func closePublisher(pub publisher.Publisher) error {
+	closer, ok := pub.(interface {
+		Close() error
+	})
+	if !ok {
+		return nil
+	}
+
+	return closer.Close()
 }
