@@ -1,10 +1,12 @@
 package delivery
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/publisher"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/usecase"
@@ -12,13 +14,18 @@ import (
 )
 
 type Handler struct {
-	publisher publisher.Publisher
-	validator validator.Validator
+	publisher   publisher.Publisher
+	validator   validator.Validator
+	idempotency usecase.IdempotencyRepository
 }
 
 type acceptedResponse struct {
 	Status               string `json:"status"`
 	AcceptedMeasurements int    `json:"accepted_measurements"`
+}
+
+type duplicateIgnoredResponse struct {
+	Status string `json:"status"`
 }
 
 type errorResponse struct {
@@ -30,10 +37,17 @@ type healthResponse struct {
 	Status string `json:"status"`
 }
 
-func NewHandler(pub publisher.Publisher, val validator.Validator) *Handler {
+const idempotencyReleaseTimeout = time.Second
+
+func NewHandler(
+	pub publisher.Publisher,
+	val validator.Validator,
+	idempotency usecase.IdempotencyRepository,
+) *Handler {
 	return &Handler{
-		publisher: pub,
-		validator: val,
+		publisher:   pub,
+		validator:   val,
+		idempotency: idempotency,
 	}
 }
 
@@ -63,9 +77,30 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reserved, err := h.idempotency.Reserve(r.Context(), batch.DeviceID, batch.BatchID)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"infrastructure_unavailable",
+			"required infrastructure is unavailable",
+		)
+		return
+	}
+	if !reserved {
+		writeJSON(w, http.StatusOK, duplicateIgnoredResponse{Status: "duplicate_ignored"})
+		return
+	}
+
 	events := usecase.BuildEvents(batch)
 	for _, event := range events {
 		if err := h.publisher.Publish(r.Context(), event); err != nil {
+			releaseCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(r.Context()),
+				idempotencyReleaseTimeout,
+			)
+			_ = h.idempotency.Release(releaseCtx, batch.DeviceID, batch.BatchID)
+			cancel()
 			writeError(w, http.StatusServiceUnavailable, "publisher_unavailable", "publisher is unavailable")
 			return
 		}

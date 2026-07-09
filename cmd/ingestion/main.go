@@ -10,6 +10,7 @@ import (
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/delivery"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/publisher"
+	redisrepository "github.com/butorovv/bmstu-practice-2026/internal/ingestion/repository/redis"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/validator"
 	"github.com/butorovv/bmstu-practice-2026/internal/shared/config"
 )
@@ -29,9 +30,21 @@ func main() {
 		}()
 	}
 
+	idempotencyRepository := redisrepository.NewIdempotencyRepository(
+		cfg.RedisAddr,
+		cfg.RedisPassword,
+		cfg.RedisDB,
+	)
+	defer func() {
+		if err := idempotencyRepository.Close(); err != nil {
+			log.Printf("close Redis: %v", err)
+		}
+	}()
+
 	handler := delivery.NewHandler(
 		pub,
 		validator.New(),
+		idempotencyRepository,
 	)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
