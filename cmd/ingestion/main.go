@@ -30,21 +30,24 @@ func main() {
 		}()
 	}
 
-	idempotencyRepository := redisrepository.NewIdempotencyRepository(
+	redisClient := redisrepository.NewClient(
 		cfg.RedisAddr,
 		cfg.RedisPassword,
 		cfg.RedisDB,
 	)
 	defer func() {
-		if err := idempotencyRepository.Close(); err != nil {
+		if err := redisClient.Close(); err != nil {
 			log.Printf("close Redis: %v", err)
 		}
 	}()
+	idempotencyRepository := redisrepository.NewIdempotencyRepository(redisClient)
+	rateLimiter := redisrepository.NewRateLimiter(redisClient)
 
 	handler := delivery.NewHandler(
 		pub,
 		validator.New(),
 		idempotencyRepository,
+		rateLimiter,
 	)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

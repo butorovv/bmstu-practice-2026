@@ -14,7 +14,6 @@ const IdempotencyTTL = 24 * time.Hour
 type redisClient interface {
 	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *goredis.BoolCmd
 	Del(ctx context.Context, keys ...string) *goredis.IntCmd
-	Close() error
 }
 
 type IdempotencyRepository struct {
@@ -23,17 +22,7 @@ type IdempotencyRepository struct {
 
 var _ usecase.IdempotencyRepository = (*IdempotencyRepository)(nil)
 
-func NewIdempotencyRepository(addr string, password string, db int) *IdempotencyRepository {
-	client := goredis.NewClient(&goredis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	})
-
-	return newIdempotencyRepository(client)
-}
-
-func newIdempotencyRepository(client redisClient) *IdempotencyRepository {
+func NewIdempotencyRepository(client redisClient) *IdempotencyRepository {
 	return &IdempotencyRepository{client: client}
 }
 
@@ -51,10 +40,6 @@ func (r *IdempotencyRepository) Release(
 	batchID string,
 ) error {
 	return r.client.Del(ctx, idempotencyKey(deviceID, batchID)).Err()
-}
-
-func (r *IdempotencyRepository) Close() error {
-	return r.client.Close()
 }
 
 func idempotencyKey(deviceID string, batchID string) string {
