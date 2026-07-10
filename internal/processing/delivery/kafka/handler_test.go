@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/detector"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
@@ -15,7 +16,13 @@ import (
 func TestMessageHandlerHandleValidEventWithoutAlert(t *testing.T) {
 	telemetryRepo := storage.NewInMemoryTelemetryRepository()
 	alertRepo := storage.NewInMemoryAlertRepository()
-	handler := NewMessageHandler(usecase.NewProcessingService(telemetryRepo, alertRepo, detector.New()))
+	handler := NewMessageHandler(usecase.NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&testSlidingWindow{},
+		&testAlertDeduplicator{reserved: true},
+	))
 
 	result, err := handler.Handle(context.Background(), []byte(`{
 		"event_id": "day-3-normal-0",
@@ -54,13 +61,35 @@ func TestMessageHandlerHandleValidEventWithoutAlert(t *testing.T) {
 func TestMessageHandlerHandleHighHeartRateCreatesAlert(t *testing.T) {
 	telemetryRepo := storage.NewInMemoryTelemetryRepository()
 	alertRepo := storage.NewInMemoryAlertRepository()
-	handler := NewMessageHandler(usecase.NewProcessingService(telemetryRepo, alertRepo, detector.New()))
+	latest := model.TelemetryEvent{
+		EventID:   "day-3-high-heart-rate-0",
+		DeviceID:  "device-001",
+		PatientID: "patient-001",
+		Timestamp: time.Date(2026, 7, 7, 12, 1, 0, 0, time.UTC),
+		HeartRate: 130,
+	}
+	handler := NewMessageHandler(usecase.NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&testSlidingWindow{events: []model.TelemetryEvent{
+			{
+				EventID:   "day-3-high-heart-rate-before",
+				DeviceID:  "device-001",
+				PatientID: "patient-001",
+				Timestamp: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC),
+				HeartRate: 130,
+			},
+			latest,
+		}},
+		&testAlertDeduplicator{reserved: true},
+	))
 
 	result, err := handler.Handle(context.Background(), []byte(`{
 		"event_id": "day-3-high-heart-rate-0",
 		"device_id": "device-001",
 		"patient_id": "patient-001",
-		"timestamp": "2026-07-07T12:00:00Z",
+		"timestamp": "2026-07-07T12:01:00Z",
 		"heart_rate": 130
 	}`))
 	if err != nil {
@@ -107,7 +136,13 @@ func TestMessageHandlerHandleInvalidJSONDoesNotCallProcessor(t *testing.T) {
 func TestMessageHandlerHandleInvalidEventReturnsValidationError(t *testing.T) {
 	telemetryRepo := storage.NewInMemoryTelemetryRepository()
 	alertRepo := storage.NewInMemoryAlertRepository()
-	handler := NewMessageHandler(usecase.NewProcessingService(telemetryRepo, alertRepo, detector.New()))
+	handler := NewMessageHandler(usecase.NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&testSlidingWindow{},
+		&testAlertDeduplicator{reserved: true},
+	))
 
 	result, err := handler.Handle(context.Background(), []byte(`{
 		"device_id": "",
@@ -163,4 +198,28 @@ func (p *spyProcessor) Process(_ context.Context, _ model.TelemetryEvent) (*usec
 	}
 
 	return p.result, nil
+}
+
+type testSlidingWindow struct {
+	events []model.TelemetryEvent
+}
+
+func (w *testSlidingWindow) Add(_ context.Context, event model.TelemetryEvent) ([]model.TelemetryEvent, error) {
+	if w.events != nil {
+		return w.events, nil
+	}
+
+	return []model.TelemetryEvent{event}, nil
+}
+
+type testAlertDeduplicator struct {
+	reserved bool
+}
+
+func (d *testAlertDeduplicator) Reserve(_ context.Context, _ string, _ string) (bool, error) {
+	return d.reserved, nil
+}
+
+func (d *testAlertDeduplicator) Release(_ context.Context, _ string, _ string) error {
+	return nil
 }

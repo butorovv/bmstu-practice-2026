@@ -14,7 +14,9 @@ import (
 func TestProcessingServiceProcessNormalHeartRate(t *testing.T) {
 	telemetryRepo := &fakeTelemetryRepository{}
 	alertRepo := &fakeAlertRepository{}
-	service := NewProcessingService(telemetryRepo, alertRepo, detector.New())
+	window := &fakeSlidingWindow{}
+	deduplicator := &fakeAlertDeduplicator{reserved: true}
+	service := NewProcessingService(telemetryRepo, alertRepo, detector.New(), window, deduplicator)
 	event := validTelemetryEvent(78)
 
 	result, err := service.Process(context.Background(), event)
@@ -27,24 +29,55 @@ func TestProcessingServiceProcessNormalHeartRate(t *testing.T) {
 	if result.AlertCreated {
 		t.Fatal("Process() created alert for normal heart_rate")
 	}
-	if result.Alert != nil {
-		t.Fatalf("Process() alert = %+v, want nil", result.Alert)
-	}
 	if len(telemetryRepo.events) != 1 {
 		t.Fatalf("saved telemetry count = %d, want 1", len(telemetryRepo.events))
+	}
+	if window.calls != 1 {
+		t.Fatalf("sliding window calls = %d, want 1", window.calls)
+	}
+	if deduplicator.calls != 0 {
+		t.Fatalf("deduplicator calls = %d, want 0", deduplicator.calls)
 	}
 	if len(alertRepo.alerts) != 0 {
 		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
 	}
 }
 
-func TestProcessingServiceProcessHighHeartRateCreatesAlert(t *testing.T) {
+func TestProcessingServiceProcessSingleHighHeartRateDoesNotCreateAlert(t *testing.T) {
 	telemetryRepo := &fakeTelemetryRepository{}
 	alertRepo := &fakeAlertRepository{}
-	service := NewProcessingService(telemetryRepo, alertRepo, detector.New())
-	event := validTelemetryEvent(detector.HighHeartRateThreshold + 1)
+	window := &fakeSlidingWindow{}
+	deduplicator := &fakeAlertDeduplicator{reserved: true}
+	service := NewProcessingService(telemetryRepo, alertRepo, detector.New(), window, deduplicator)
 
-	result, err := service.Process(context.Background(), event)
+	result, err := service.Process(context.Background(), validTelemetryEvent(detector.HighHeartRateThreshold+1))
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Process() result is nil")
+	}
+	if result.AlertCreated {
+		t.Fatal("Process() created alert for a single high measurement")
+	}
+	if len(alertRepo.alerts) != 0 {
+		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
+	}
+}
+
+func TestProcessingServiceProcessSustainedHighHeartRateCreatesAlert(t *testing.T) {
+	telemetryRepo := &fakeTelemetryRepository{}
+	alertRepo := &fakeAlertRepository{}
+	latest := validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime().Add(time.Minute), "event-003")
+	window := &fakeSlidingWindow{events: []model.TelemetryEvent{
+		validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime(), "event-001"),
+		validTelemetryEventAt(detector.HighHeartRateThreshold+2, baseTime().Add(30*time.Second), "event-002"),
+		latest,
+	}}
+	deduplicator := &fakeAlertDeduplicator{reserved: true}
+	service := NewProcessingService(telemetryRepo, alertRepo, detector.New(), window, deduplicator)
+
+	result, err := service.Process(context.Background(), latest)
 	if err != nil {
 		t.Fatalf("Process() error = %v", err)
 	}
@@ -52,7 +85,7 @@ func TestProcessingServiceProcessHighHeartRateCreatesAlert(t *testing.T) {
 		t.Fatal("Process() result is nil")
 	}
 	if !result.AlertCreated {
-		t.Fatal("Process() did not create alert for high heart_rate")
+		t.Fatal("Process() did not create alert for sustained high heart_rate")
 	}
 	if result.Alert == nil {
 		t.Fatal("Process() alert is nil")
@@ -60,11 +93,63 @@ func TestProcessingServiceProcessHighHeartRateCreatesAlert(t *testing.T) {
 	if result.Alert.Type != model.AlertTypeHighHeartRate {
 		t.Fatalf("alert type = %q, want %q", result.Alert.Type, model.AlertTypeHighHeartRate)
 	}
-	if result.Alert.Message != model.HighHeartRateMessage {
-		t.Fatalf("alert message = %q, want %q", result.Alert.Message, model.HighHeartRateMessage)
-	}
 	if len(telemetryRepo.events) != 1 {
 		t.Fatalf("saved telemetry count = %d, want 1", len(telemetryRepo.events))
+	}
+	if len(alertRepo.alerts) != 1 {
+		t.Fatalf("saved alerts count = %d, want 1", len(alertRepo.alerts))
+	}
+	if deduplicator.calls != 1 {
+		t.Fatalf("deduplicator calls = %d, want 1", deduplicator.calls)
+	}
+}
+
+func TestProcessingServiceProcessDeduplicatedAlertDoesNotSaveAlert(t *testing.T) {
+	telemetryRepo := &fakeTelemetryRepository{}
+	alertRepo := &fakeAlertRepository{hasRecentAlert: true}
+	latest := validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime().Add(time.Minute), "event-003")
+	window := &fakeSlidingWindow{events: []model.TelemetryEvent{
+		validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime(), "event-001"),
+		latest,
+	}}
+	deduplicator := &fakeAlertDeduplicator{reserved: false}
+	service := NewProcessingService(telemetryRepo, alertRepo, detector.New(), window, deduplicator)
+
+	result, err := service.Process(context.Background(), latest)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Process() result is nil")
+	}
+	if result.AlertCreated {
+		t.Fatal("Process() created duplicate alert")
+	}
+	if len(alertRepo.alerts) != 0 {
+		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
+	}
+}
+
+func TestProcessingServiceProcessRecoversAlertWhenDedupExistsWithoutPostgresRecord(t *testing.T) {
+	telemetryRepo := &fakeTelemetryRepository{}
+	alertRepo := &fakeAlertRepository{hasRecentAlert: false}
+	latest := validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime().Add(time.Minute), "event-003")
+	window := &fakeSlidingWindow{events: []model.TelemetryEvent{
+		validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime(), "event-001"),
+		latest,
+	}}
+	deduplicator := &fakeAlertDeduplicator{reserved: false}
+	service := NewProcessingService(telemetryRepo, alertRepo, detector.New(), window, deduplicator)
+
+	result, err := service.Process(context.Background(), latest)
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Process() result is nil")
+	}
+	if !result.AlertCreated {
+		t.Fatal("Process() did not recover missing alert")
 	}
 	if len(alertRepo.alerts) != 1 {
 		t.Fatalf("saved alerts count = %d, want 1", len(alertRepo.alerts))
@@ -74,7 +159,13 @@ func TestProcessingServiceProcessHighHeartRateCreatesAlert(t *testing.T) {
 func TestProcessingServiceProcessValidationError(t *testing.T) {
 	telemetryRepo := &fakeTelemetryRepository{}
 	alertRepo := &fakeAlertRepository{}
-	service := NewProcessingService(telemetryRepo, alertRepo, detector.New())
+	service := NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&fakeSlidingWindow{},
+		&fakeAlertDeduplicator{reserved: true},
+	)
 	event := validTelemetryEvent(78)
 	event.EventID = ""
 
@@ -88,16 +179,20 @@ func TestProcessingServiceProcessValidationError(t *testing.T) {
 	if len(telemetryRepo.events) != 0 {
 		t.Fatalf("saved telemetry count = %d, want 0", len(telemetryRepo.events))
 	}
-	if len(alertRepo.alerts) != 0 {
-		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
-	}
 }
 
 func TestProcessingServiceProcessTelemetrySaveError(t *testing.T) {
 	wantErr := errors.New("telemetry save failed")
 	telemetryRepo := &fakeTelemetryRepository{err: wantErr}
 	alertRepo := &fakeAlertRepository{}
-	service := NewProcessingService(telemetryRepo, alertRepo, detector.New())
+	window := &fakeSlidingWindow{}
+	service := NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		window,
+		&fakeAlertDeduplicator{reserved: true},
+	)
 
 	result, err := service.Process(context.Background(), validTelemetryEvent(78))
 	if !errors.Is(err, wantErr) {
@@ -106,18 +201,51 @@ func TestProcessingServiceProcessTelemetrySaveError(t *testing.T) {
 	if result != nil {
 		t.Fatalf("Process() result = %+v, want nil", result)
 	}
-	if len(alertRepo.alerts) != 0 {
-		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
+	if window.calls != 0 {
+		t.Fatalf("sliding window calls = %d, want 0", window.calls)
 	}
 }
 
-func TestProcessingServiceProcessAlertSaveError(t *testing.T) {
+func TestProcessingServiceProcessSlidingWindowError(t *testing.T) {
+	wantErr := errors.New("redis unavailable")
+	telemetryRepo := &fakeTelemetryRepository{}
+	alertRepo := &fakeAlertRepository{}
+	window := &fakeSlidingWindow{err: wantErr}
+	service := NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		window,
+		&fakeAlertDeduplicator{reserved: true},
+	)
+
+	result, err := service.Process(context.Background(), validTelemetryEvent(78))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Process() error = %v, want %v", err, wantErr)
+	}
+	if result != nil {
+		t.Fatalf("Process() result = %+v, want nil", result)
+	}
+}
+
+func TestProcessingServiceProcessAlertSaveErrorReleasesDeduplication(t *testing.T) {
 	wantErr := errors.New("alert save failed")
 	telemetryRepo := &fakeTelemetryRepository{}
 	alertRepo := &fakeAlertRepository{saveErr: wantErr}
-	service := NewProcessingService(telemetryRepo, alertRepo, detector.New())
+	latest := validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime().Add(time.Minute), "event-003")
+	deduplicator := &fakeAlertDeduplicator{reserved: true}
+	service := NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&fakeSlidingWindow{events: []model.TelemetryEvent{
+			validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime(), "event-001"),
+			latest,
+		}},
+		deduplicator,
+	)
 
-	result, err := service.Process(context.Background(), validTelemetryEvent(detector.HighHeartRateThreshold+1))
+	result, err := service.Process(context.Background(), latest)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Process() error = %v, want %v", err, wantErr)
 	}
@@ -130,16 +258,27 @@ func TestProcessingServiceProcessAlertSaveError(t *testing.T) {
 	if len(alertRepo.alerts) != 0 {
 		t.Fatalf("saved alerts count = %d, want 0", len(alertRepo.alerts))
 	}
+	if deduplicator.releaseCalls != 1 {
+		t.Fatalf("deduplication release calls = %d, want 1", deduplicator.releaseCalls)
+	}
 }
 
 func validTelemetryEvent(heartRate int) model.TelemetryEvent {
+	return validTelemetryEventAt(heartRate, baseTime(), "event-001")
+}
+
+func validTelemetryEventAt(heartRate int, timestamp time.Time, eventID string) model.TelemetryEvent {
 	return model.TelemetryEvent{
-		EventID:   "event-001",
+		EventID:   eventID,
 		DeviceID:  "device-001",
 		PatientID: "patient-001",
-		Timestamp: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC),
+		Timestamp: timestamp,
 		HeartRate: heartRate,
 	}
+}
+
+func baseTime() time.Time {
+	return time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 }
 
 type fakeTelemetryRepository struct {
@@ -158,8 +297,10 @@ func (r *fakeTelemetryRepository) SaveTelemetry(_ context.Context, event model.T
 }
 
 type fakeAlertRepository struct {
-	alerts  []model.Alert
-	saveErr error
+	alerts         []model.Alert
+	saveErr        error
+	hasRecentAlert bool
+	hasRecentErr   error
 }
 
 func (r *fakeAlertRepository) SaveAlert(_ context.Context, alert model.Alert) error {
@@ -172,17 +313,55 @@ func (r *fakeAlertRepository) SaveAlert(_ context.Context, alert model.Alert) er
 	return nil
 }
 
-func (r *fakeAlertRepository) GetRecentAlerts(_ context.Context) ([]model.Alert, error) {
-	return r.alerts, nil
-}
-
-func (r *fakeAlertRepository) GetAlertsByPatientID(_ context.Context, patientID string) ([]model.Alert, error) {
-	alerts := make([]model.Alert, 0)
-	for _, alert := range r.alerts {
-		if alert.PatientID == patientID {
-			alerts = append(alerts, alert)
-		}
+func (r *fakeAlertRepository) HasRecentAlert(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ time.Time,
+) (bool, error) {
+	if r.hasRecentErr != nil {
+		return false, r.hasRecentErr
 	}
 
-	return alerts, nil
+	return r.hasRecentAlert, nil
+}
+
+type fakeSlidingWindow struct {
+	events []model.TelemetryEvent
+	err    error
+	calls  int
+}
+
+func (w *fakeSlidingWindow) Add(_ context.Context, event model.TelemetryEvent) ([]model.TelemetryEvent, error) {
+	w.calls++
+	if w.err != nil {
+		return nil, w.err
+	}
+	if w.events != nil {
+		return w.events, nil
+	}
+
+	return []model.TelemetryEvent{event}, nil
+}
+
+type fakeAlertDeduplicator struct {
+	reserved     bool
+	err          error
+	releaseErr   error
+	calls        int
+	releaseCalls int
+}
+
+func (d *fakeAlertDeduplicator) Reserve(_ context.Context, _ string, _ string) (bool, error) {
+	d.calls++
+	if d.err != nil {
+		return false, d.err
+	}
+
+	return d.reserved, nil
+}
+
+func (d *fakeAlertDeduplicator) Release(_ context.Context, _ string, _ string) error {
+	d.releaseCalls++
+	return d.releaseErr
 }

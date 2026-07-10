@@ -1,6 +1,8 @@
 package config
 
 import (
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,12 +16,21 @@ const (
 	DefaultPublisherBackend    = "log"
 	DefaultKafkaBrokers        = "localhost:29092"
 	DefaultKafkaTelemetryTopic = "telemetry.raw"
+	DefaultKafkaDLQTopic       = "telemetry.dlq"
 	DefaultKafkaConsumerGroup  = "processing-service"
 	DefaultKafkaPublishTimeout = 5 * time.Second
 	DefaultKafkaMaxAttempts    = 5
 	DefaultKafkaMaxInFlight    = 32
 	DefaultRequestTimeout      = 10 * time.Second
 	DefaultRedisAddr           = "localhost:6379"
+	DefaultPostgresHost        = "localhost"
+	DefaultPostgresPort        = 5432
+	DefaultPostgresDB          = "telemetry"
+	DefaultPostgresUser        = "postgres"
+	DefaultPostgresPassword    = "postgres"
+	DefaultPostgresSSLMode     = "disable"
+	DefaultWindowTTL           = 5 * time.Minute
+	DefaultAlertDedupTTL       = 5 * time.Minute
 )
 
 type Config struct {
@@ -41,16 +52,57 @@ type ProcessingConfig struct {
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
 	Kafka           KafkaConfig
+	Redis           RedisConfig
+	Postgres        PostgresConfig
+	WindowTTL       time.Duration
+	AlertDedupTTL   time.Duration
 }
 
 type KafkaConfig struct {
 	Brokers        []string
 	TelemetryTopic string
+	DLQTopic       string
 	ConsumerGroup  string
+}
+
+type RedisConfig struct {
+	Addr     string
+	Password string
+	DB       int
+}
+
+type PostgresConfig struct {
+	Host     string
+	Port     int
+	DB       string
+	User     string
+	Password string
+	SSLMode  string
+}
+
+func (c PostgresConfig) DSN() string {
+	user := url.User(c.User)
+	if c.Password != "" {
+		user = url.UserPassword(c.User, c.Password)
+	}
+
+	dsn := url.URL{
+		Scheme: "postgres",
+		User:   user,
+		Host:   net.JoinHostPort(c.Host, strconv.Itoa(c.Port)),
+		Path:   c.DB,
+	}
+
+	query := dsn.Query()
+	query.Set("sslmode", c.SSLMode)
+	dsn.RawQuery = query.Encode()
+
+	return dsn.String()
 }
 
 func Load() Config {
 	kafkaConfig := loadKafkaConfig()
+	redisConfig := loadRedisConfig()
 
 	return Config{
 		HTTPAddr:            getEnv("HTTP_ADDR", DefaultHTTPAddr),
@@ -62,9 +114,9 @@ func Load() Config {
 		KafkaMaxAttempts:    getIntEnv("KAFKA_MAX_ATTEMPTS", DefaultKafkaMaxAttempts),
 		KafkaMaxInFlight:    getIntEnv("KAFKA_MAX_IN_FLIGHT", DefaultKafkaMaxInFlight),
 		RequestTimeout:      getDurationEnv("REQUEST_TIMEOUT", DefaultRequestTimeout),
-		RedisAddr:           getEnv("REDIS_ADDR", DefaultRedisAddr),
-		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
-		RedisDB:             getIntEnv("REDIS_DB", 0),
+		RedisAddr:           redisConfig.Addr,
+		RedisPassword:       redisConfig.Password,
+		RedisDB:             redisConfig.DB,
 	}
 }
 
@@ -73,6 +125,10 @@ func LoadProcessing() ProcessingConfig {
 		HTTPAddr:        getEnv("PROCESSING_HTTP_ADDR", DefaultProcessingHTTPAddr),
 		ShutdownTimeout: DefaultShutdownTimeout,
 		Kafka:           loadKafkaConfig(),
+		Redis:           loadRedisConfig(),
+		Postgres:        loadPostgresConfig(),
+		WindowTTL:       getDurationEnv("WINDOW_TTL", DefaultWindowTTL),
+		AlertDedupTTL:   getDurationEnv("ALERT_DEDUP_TTL", DefaultAlertDedupTTL),
 	}
 }
 
@@ -89,7 +145,27 @@ func loadKafkaConfig() KafkaConfig {
 	return KafkaConfig{
 		Brokers:        splitCSV(getEnv("KAFKA_BROKERS", DefaultKafkaBrokers)),
 		TelemetryTopic: getEnv("KAFKA_TELEMETRY_TOPIC", getEnv("KAFKA_RAW_TOPIC", DefaultKafkaTelemetryTopic)),
+		DLQTopic:       getEnv("KAFKA_DLQ_TOPIC", DefaultKafkaDLQTopic),
 		ConsumerGroup:  getEnv("KAFKA_CONSUMER_GROUP", getEnv("KAFKA_GROUP_ID", DefaultKafkaConsumerGroup)),
+	}
+}
+
+func loadRedisConfig() RedisConfig {
+	return RedisConfig{
+		Addr:     getEnv("REDIS_ADDR", DefaultRedisAddr),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       getIntEnv("REDIS_DB", 0),
+	}
+}
+
+func loadPostgresConfig() PostgresConfig {
+	return PostgresConfig{
+		Host:     getEnv("POSTGRES_HOST", DefaultPostgresHost),
+		Port:     getIntEnv("POSTGRES_PORT", DefaultPostgresPort),
+		DB:       getEnv("POSTGRES_DB", DefaultPostgresDB),
+		User:     getEnv("POSTGRES_USER", DefaultPostgresUser),
+		Password: getEnv("POSTGRES_PASSWORD", DefaultPostgresPassword),
+		SSLMode:  getEnv("POSTGRES_SSLMODE", DefaultPostgresSSLMode),
 	}
 }
 
