@@ -2,6 +2,8 @@ package kafka
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -17,21 +19,36 @@ const (
 	defaultRetryBackoff = time.Second
 	defaultMinBytes     = 1
 	defaultMaxBytes     = 10e6
+	defaultDLQTopic     = "telemetry.dlq"
 )
 
 type ConsumerConfig struct {
 	Brokers      []string
 	Topic        string
+	DLQTopic     string
 	GroupID      string
 	RetryBackoff time.Duration
 }
 
+type messageReader interface {
+	FetchMessage(ctx context.Context) (kafkago.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafkago.Message) error
+	Close() error
+}
+
+type messageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
+	Close() error
+}
+
 type Consumer struct {
-	reader       *kafkago.Reader
+	reader       messageReader
+	dlqWriter    messageWriter
 	handler      *MessageHandler
 	logger       *log.Logger
 	brokers      []string
 	topic        string
+	dlqTopic     string
 	groupID      string
 	retryBackoff time.Duration
 	closeOnce    sync.Once
@@ -45,6 +62,9 @@ func NewConsumer(cfg ConsumerConfig, handler *MessageHandler, logger *log.Logger
 	if cfg.RetryBackoff == 0 {
 		cfg.RetryBackoff = defaultRetryBackoff
 	}
+	if cfg.DLQTopic == "" {
+		cfg.DLQTopic = defaultDLQTopic
+	}
 
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
 		Brokers:        cfg.Brokers,
@@ -54,15 +74,46 @@ func NewConsumer(cfg ConsumerConfig, handler *MessageHandler, logger *log.Logger
 		MaxBytes:       defaultMaxBytes,
 		CommitInterval: 0,
 	})
+	dlqWriter := &kafkago.Writer{
+		Addr:                   kafkago.TCP(cfg.Brokers...),
+		Topic:                  cfg.DLQTopic,
+		Balancer:               &kafkago.Hash{},
+		RequiredAcks:           kafkago.RequireAll,
+		Async:                  false,
+		AllowAutoTopicCreation: false,
+	}
+
+	return &Consumer{
+		reader:       reader,
+		dlqWriter:    dlqWriter,
+		handler:      handler,
+		logger:       logger,
+		brokers:      cfg.Brokers,
+		topic:        cfg.Topic,
+		dlqTopic:     cfg.DLQTopic,
+		groupID:      cfg.GroupID,
+		retryBackoff: cfg.RetryBackoff,
+	}
+}
+
+func newConsumerWithReader(
+	reader messageReader,
+	handler *MessageHandler,
+	logger *log.Logger,
+	retryBackoff time.Duration,
+) *Consumer {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if retryBackoff == 0 {
+		retryBackoff = defaultRetryBackoff
+	}
 
 	return &Consumer{
 		reader:       reader,
 		handler:      handler,
 		logger:       logger,
-		brokers:      cfg.Brokers,
-		topic:        cfg.Topic,
-		groupID:      cfg.GroupID,
-		retryBackoff: cfg.RetryBackoff,
+		retryBackoff: retryBackoff,
 	}
 }
 
@@ -73,26 +124,29 @@ func (c *Consumer) Run(ctx context.Context) error {
 		}
 	}()
 
-	for {
-		if err := c.ensureTopic(ctx); err != nil {
-			if isContextDone(ctx) {
-				return nil
-			}
+	for _, topic := range c.topicsToEnsure() {
+		for {
+			if err := c.ensureTopic(ctx, topic); err != nil {
+				if isContextDone(ctx) {
+					return nil
+				}
 
-			c.logger.Printf("failed to ensure kafka topic topic=%s error=%v", c.topic, err)
-			if !sleepContext(ctx, c.retryBackoff) {
-				return nil
+				c.logger.Printf("failed to ensure kafka topic topic=%s error=%v", topic, err)
+				if !sleepContext(ctx, c.retryBackoff) {
+					return nil
+				}
+				continue
 			}
-			continue
+			break
 		}
-		break
 	}
 
 	c.logger.Printf(
-		"starting kafka consumer brokers=%s topic=%s group_id=%s",
+		"starting kafka consumer brokers=%s topic=%s group_id=%s dlq_topic=%s",
 		strings.Join(c.brokers, ","),
 		c.topic,
 		c.groupID,
+		c.dlqTopic,
 	)
 
 	for {
@@ -118,16 +172,21 @@ func (c *Consumer) Run(ctx context.Context) error {
 func (c *Consumer) Close() error {
 	c.closeOnce.Do(func() {
 		c.closeErr = c.reader.Close()
+		if c.dlqWriter != nil {
+			if err := c.dlqWriter.Close(); c.closeErr == nil {
+				c.closeErr = err
+			}
+		}
 	})
 
 	return c.closeErr
 }
 
-func (c *Consumer) ensureTopic(ctx context.Context) error {
+func (c *Consumer) ensureTopic(ctx context.Context, topic string) error {
 	if len(c.brokers) == 0 {
 		return errors.New("kafka brokers are required")
 	}
-	if c.topic == "" {
+	if topic == "" {
 		return errors.New("kafka topic is required")
 	}
 
@@ -150,10 +209,19 @@ func (c *Consumer) ensureTopic(ctx context.Context) error {
 	defer controllerConn.Close()
 
 	return controllerConn.CreateTopics(kafkago.TopicConfig{
-		Topic:             c.topic,
+		Topic:             topic,
 		NumPartitions:     1,
 		ReplicationFactor: 1,
 	})
+}
+
+func (c *Consumer) topicsToEnsure() []string {
+	topics := []string{c.topic}
+	if c.dlqWriter != nil && c.dlqTopic != "" && c.dlqTopic != c.topic {
+		topics = append(topics, c.dlqTopic)
+	}
+
+	return topics
 }
 
 func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Message) error {
@@ -191,6 +259,12 @@ func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Mes
 				message.Offset,
 				err,
 			)
+			if err := c.sendToDLQWithRetry(ctx, message, err); err != nil {
+				if isContextDone(ctx) {
+					return nil
+				}
+				return err
+			}
 			return c.commitWithRetry(ctx, message)
 		}
 		if isSkippableError(err) {
@@ -201,6 +275,12 @@ func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Mes
 				message.Offset,
 				err,
 			)
+			if err := c.sendToDLQWithRetry(ctx, message, err); err != nil {
+				if isContextDone(ctx) {
+					return nil
+				}
+				return err
+			}
 			return c.commitWithRetry(ctx, message)
 		}
 
@@ -215,6 +295,70 @@ func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Mes
 			return nil
 		}
 	}
+}
+
+func (c *Consumer) sendToDLQWithRetry(ctx context.Context, message kafkago.Message, reason error) error {
+	for {
+		if err := c.sendToDLQ(ctx, message, reason); err != nil {
+			if isContextDone(ctx) {
+				return ctx.Err()
+			}
+
+			c.logger.Printf(
+				"failed to publish kafka message to dlq topic=%s source_topic=%s partition=%d offset=%d error=%v",
+				c.dlqTopic,
+				message.Topic,
+				message.Partition,
+				message.Offset,
+				err,
+			)
+			if !sleepContext(ctx, c.retryBackoff) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		return nil
+	}
+}
+
+func (c *Consumer) sendToDLQ(ctx context.Context, message kafkago.Message, reason error) error {
+	if c.dlqWriter == nil {
+		return errors.New("kafka dlq writer is not configured")
+	}
+
+	payload, err := json.Marshal(deadLetterMessage{
+		Reason:          reason.Error(),
+		Timestamp:       time.Now().UTC(),
+		SourceTopic:     message.Topic,
+		SourcePartition: message.Partition,
+		SourceOffset:    message.Offset,
+		PayloadBase64:   base64.StdEncoding.EncodeToString(message.Value),
+	})
+	if err != nil {
+		return err
+	}
+
+	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+		Key:   message.Key,
+		Value: payload,
+		Time:  time.Now().UTC(),
+		Headers: []kafkago.Header{
+			{Key: "source_topic", Value: []byte(message.Topic)},
+			{Key: "source_partition", Value: []byte(strconv.Itoa(message.Partition))},
+			{Key: "source_offset", Value: []byte(strconv.FormatInt(message.Offset, 10))},
+			{Key: "reason", Value: []byte(reason.Error())},
+		},
+	})
+}
+
+type deadLetterMessage struct {
+	Reason          string    `json:"reason"`
+	Timestamp       time.Time `json:"timestamp"`
+	SourceTopic     string    `json:"source_topic"`
+	SourcePartition int       `json:"source_partition"`
+	SourceOffset    int64     `json:"source_offset"`
+	PayloadBase64   string    `json:"payload_base64"`
 }
 
 func (c *Consumer) commitWithRetry(ctx context.Context, message kafkago.Message) error {
