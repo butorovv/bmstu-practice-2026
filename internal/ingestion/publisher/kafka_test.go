@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,9 +15,11 @@ type fakeMessageWriter struct {
 	err      error
 	messages []kafka.Message
 	closed   bool
+	calls    int32
 }
 
 func (f *fakeMessageWriter) WriteMessages(_ context.Context, messages ...kafka.Message) error {
+	atomic.AddInt32(&f.calls, 1)
 	f.messages = append(f.messages, messages...)
 	return f.err
 }
@@ -73,8 +76,28 @@ func TestKafkaPublisherReturnsWriterError(t *testing.T) {
 	}
 }
 
+func TestKafkaPublisherReturnsBackpressureWhenInFlightLimitIsFull(t *testing.T) {
+	writer := &fakeMessageWriter{}
+	pub := newKafkaPublisher(writer, time.Millisecond, 1)
+	pub.inFlight <- struct{}{}
+
+	err := pub.Publish(context.Background(), TelemetryEvent{PatientID: "patient-001"})
+
+	if !errors.Is(err, ErrBackpressure) {
+		t.Fatalf("Publish() error = %v, want %v", err, ErrBackpressure)
+	}
+	if calls := atomic.LoadInt32(&writer.calls); calls != 0 {
+		t.Fatalf("writer calls = %d, want 0", calls)
+	}
+}
+
 func TestNewKafkaPublisherUsesContractSettings(t *testing.T) {
-	pub, err := NewKafkaPublisher([]string{"localhost:9092"}, time.Second)
+	pub, err := NewKafkaPublisherWithConfig(KafkaPublisherConfig{
+		Brokers:        []string{"localhost:9092"},
+		PublishTimeout: time.Second,
+		MaxAttempts:    4,
+		MaxInFlight:    7,
+	})
 	if err != nil {
 		t.Fatalf("NewKafkaPublisher() error = %v", err)
 	}
@@ -90,6 +113,24 @@ func TestNewKafkaPublisherUsesContractSettings(t *testing.T) {
 	if writer.RequiredAcks != kafka.RequireAll {
 		t.Fatalf("required acks = %v, want %v", writer.RequiredAcks, kafka.RequireAll)
 	}
+	if writer.MaxAttempts != 4 {
+		t.Fatalf("max attempts = %d, want 4", writer.MaxAttempts)
+	}
+	if writer.WriteBackoffMin != 100*time.Millisecond {
+		t.Fatalf("write backoff min = %v, want 100ms", writer.WriteBackoffMin)
+	}
+	if writer.WriteBackoffMax != time.Second {
+		t.Fatalf("write backoff max = %v, want 1s", writer.WriteBackoffMax)
+	}
+	if writer.BatchTimeout != 10*time.Millisecond {
+		t.Fatalf("batch timeout = %v, want 10ms", writer.BatchTimeout)
+	}
+	if writer.ReadTimeout != time.Second {
+		t.Fatalf("read timeout = %v, want 1s", writer.ReadTimeout)
+	}
+	if writer.WriteTimeout != time.Second {
+		t.Fatalf("write timeout = %v, want 1s", writer.WriteTimeout)
+	}
 	if writer.Async {
 		t.Fatal("writer must publish synchronously")
 	}
@@ -98,6 +139,9 @@ func TestNewKafkaPublisherUsesContractSettings(t *testing.T) {
 	}
 	if writer.AllowAutoTopicCreation {
 		t.Fatal("automatic topic creation must be disabled")
+	}
+	if cap(pub.inFlight) != 7 {
+		t.Fatalf("in-flight limit = %d, want 7", cap(pub.inFlight))
 	}
 }
 

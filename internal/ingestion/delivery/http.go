@@ -19,6 +19,7 @@ type Handler struct {
 	validator   validator.Validator
 	idempotency usecase.IdempotencyRepository
 	rateLimiter usecase.RateLimiter
+	timeout     time.Duration
 }
 
 type acceptedResponse struct {
@@ -41,17 +42,32 @@ type healthResponse struct {
 
 const idempotencyReleaseTimeout = time.Second
 
+type HandlerOptions struct {
+	RequestTimeout time.Duration
+}
+
 func NewHandler(
 	pub publisher.Publisher,
 	val validator.Validator,
 	idempotency usecase.IdempotencyRepository,
 	rateLimiter usecase.RateLimiter,
 ) *Handler {
+	return NewHandlerWithOptions(pub, val, idempotency, rateLimiter, HandlerOptions{})
+}
+
+func NewHandlerWithOptions(
+	pub publisher.Publisher,
+	val validator.Validator,
+	idempotency usecase.IdempotencyRepository,
+	rateLimiter usecase.RateLimiter,
+	opts HandlerOptions,
+) *Handler {
 	return &Handler{
 		publisher:   pub,
 		validator:   val,
 		idempotency: idempotency,
 		rateLimiter: rateLimiter,
+		timeout:     opts.RequestTimeout,
 	}
 }
 
@@ -63,6 +79,13 @@ func NewRouter(handler *Handler) http.Handler {
 }
 
 func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if h.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.timeout)
+		defer cancel()
+	}
+
 	var batch usecase.TelemetryBatch
 
 	decoder := json.NewDecoder(r.Body)
@@ -81,7 +104,7 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reserved, err := h.idempotency.Reserve(r.Context(), batch.DeviceID, batch.BatchID)
+	reserved, err := h.idempotency.Reserve(ctx, batch.DeviceID, batch.BatchID)
 	if err != nil {
 		writeError(
 			w,
@@ -96,9 +119,9 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rateLimit, err := h.rateLimiter.Allow(r.Context(), batch.DeviceID)
+	rateLimit, err := h.rateLimiter.Allow(ctx, batch.DeviceID)
 	if err != nil {
-		_ = h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID)
+		_ = h.releaseIdempotency(ctx, batch.DeviceID, batch.BatchID)
 		writeError(
 			w,
 			http.StatusServiceUnavailable,
@@ -108,7 +131,7 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !rateLimit.Allowed {
-		if err := h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID); err != nil {
+		if err := h.releaseIdempotency(ctx, batch.DeviceID, batch.BatchID); err != nil {
 			writeError(
 				w,
 				http.StatusServiceUnavailable,
@@ -134,8 +157,8 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	events := usecase.BuildEvents(batch)
 	for _, event := range events {
-		if err := h.publisher.Publish(r.Context(), event); err != nil {
-			_ = h.releaseIdempotency(r.Context(), batch.DeviceID, batch.BatchID)
+		if err := h.publisher.Publish(ctx, event); err != nil {
+			_ = h.releaseIdempotency(ctx, batch.DeviceID, batch.BatchID)
 			writeError(w, http.StatusServiceUnavailable, "publisher_unavailable", "publisher is unavailable")
 			return
 		}

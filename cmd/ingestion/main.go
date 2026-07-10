@@ -26,11 +26,12 @@ func main() {
 	idempotencyRepository := redisrepo.NewIdempotencyRepository(redisClient)
 	rateLimiter := redisrepo.NewRateLimiter(redisClient)
 
-	handler := delivery.NewHandler(
+	handler := delivery.NewHandlerWithOptions(
 		pub,
 		validator.New(),
 		idempotencyRepository,
 		rateLimiter,
+		delivery.HandlerOptions{RequestTimeout: cfg.RequestTimeout},
 	)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
@@ -72,7 +73,12 @@ func newPublisher(cfg config.Config) (publisher.Publisher, error) {
 		return publisher.NewLogPublisher(), nil
 	case "kafka":
 		log.Printf("using kafka publisher brokers=%v topic=%s", cfg.KafkaBrokers, publisher.TelemetryRawTopic)
-		return publisher.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaPublishTimeout)
+		return publisher.NewKafkaPublisherWithConfig(publisher.KafkaPublisherConfig{
+			Brokers:        cfg.KafkaBrokers,
+			PublishTimeout: cfg.KafkaPublishTimeout,
+			MaxAttempts:    cfg.KafkaMaxAttempts,
+			MaxInFlight:    cfg.KafkaMaxInFlight,
+		})
 	default:
 		return nil, fmt.Errorf("unsupported PUBLISHER_BACKEND %q", cfg.PublisherBackend)
 	}
