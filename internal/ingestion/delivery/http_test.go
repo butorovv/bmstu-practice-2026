@@ -16,11 +16,16 @@ import (
 )
 
 type fakePublisher struct {
-	err    error
-	events []publisher.TelemetryEvent
+	err            error
+	waitForContext bool
+	events         []publisher.TelemetryEvent
 }
 
 func (f *fakePublisher) Publish(ctx context.Context, event publisher.TelemetryEvent) error {
+	if f.waitForContext {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -158,6 +163,32 @@ func TestAcceptTelemetryReturnsServiceUnavailableForPublisherError(t *testing.T)
 	pub := &fakePublisher{err: errors.New("publish failed")}
 	idempotency := &fakeIdempotencyRepository{reserved: true}
 	router := NewRouter(NewHandler(pub, validator.New(), idempotency, allowingRateLimiter()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telemetry", bytes.NewBufferString(validTelemetryJSON()))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	assertErrorCode(t, rec, "publisher_unavailable")
+	if idempotency.releaseCalls != 1 {
+		t.Fatalf("idempotency release calls = %d, want 1", idempotency.releaseCalls)
+	}
+}
+
+func TestAcceptTelemetryReturnsServiceUnavailableWhenRequestTimesOut(t *testing.T) {
+	pub := &fakePublisher{waitForContext: true}
+	idempotency := &fakeIdempotencyRepository{reserved: true}
+	handler := NewHandlerWithOptions(
+		pub,
+		validator.New(),
+		idempotency,
+		allowingRateLimiter(),
+		HandlerOptions{RequestTimeout: time.Millisecond},
+	)
+	router := NewRouter(handler)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/telemetry", bytes.NewBufferString(validTelemetryJSON()))
 	rec := httptest.NewRecorder()

@@ -12,6 +12,9 @@ func TestLoadCombinesKafkaAndRedisConfig(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "kafka-1:9092, kafka-2:9092")
 	t.Setenv("KAFKA_TELEMETRY_TOPIC", "telemetry.raw")
 	t.Setenv("KAFKA_PUBLISH_TIMEOUT", "7s")
+	t.Setenv("KAFKA_MAX_ATTEMPTS", "4")
+	t.Setenv("KAFKA_MAX_IN_FLIGHT", "8")
+	t.Setenv("REQUEST_TIMEOUT", "3s")
 	t.Setenv("REDIS_ADDR", "redis:6379")
 	t.Setenv("REDIS_PASSWORD", "secret")
 	t.Setenv("REDIS_DB", "2")
@@ -30,6 +33,15 @@ func TestLoadCombinesKafkaAndRedisConfig(t *testing.T) {
 	}
 	if cfg.KafkaPublishTimeout != 7*time.Second {
 		t.Fatalf("KafkaPublishTimeout = %v, want 7s", cfg.KafkaPublishTimeout)
+	}
+	if cfg.KafkaMaxAttempts != 4 {
+		t.Fatalf("KafkaMaxAttempts = %d, want 4", cfg.KafkaMaxAttempts)
+	}
+	if cfg.KafkaMaxInFlight != 8 {
+		t.Fatalf("KafkaMaxInFlight = %d, want 8", cfg.KafkaMaxInFlight)
+	}
+	if cfg.RequestTimeout != 3*time.Second {
+		t.Fatalf("RequestTimeout = %v, want 3s", cfg.RequestTimeout)
 	}
 	if cfg.RedisAddr != "redis:6379" || cfg.RedisPassword != "secret" || cfg.RedisDB != 2 {
 		t.Fatalf("Redis config = %q, %q, %d", cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)

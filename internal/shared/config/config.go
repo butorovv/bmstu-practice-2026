@@ -16,6 +16,9 @@ const (
 	DefaultKafkaTelemetryTopic = "telemetry.raw"
 	DefaultKafkaConsumerGroup  = "processing-service"
 	DefaultKafkaPublishTimeout = 5 * time.Second
+	DefaultKafkaMaxAttempts    = 5
+	DefaultKafkaMaxInFlight    = 32
+	DefaultRequestTimeout      = 10 * time.Second
 	DefaultRedisAddr           = "localhost:6379"
 )
 
@@ -26,6 +29,9 @@ type Config struct {
 	Kafka               KafkaConfig
 	KafkaBrokers        []string
 	KafkaPublishTimeout time.Duration
+	KafkaMaxAttempts    int
+	KafkaMaxInFlight    int
+	RequestTimeout      time.Duration
 	RedisAddr           string
 	RedisPassword       string
 	RedisDB             int
@@ -53,6 +59,9 @@ func Load() Config {
 		Kafka:               kafkaConfig,
 		KafkaBrokers:        kafkaConfig.Brokers,
 		KafkaPublishTimeout: getDurationEnv("KAFKA_PUBLISH_TIMEOUT", DefaultKafkaPublishTimeout),
+		KafkaMaxAttempts:    getIntEnv("KAFKA_MAX_ATTEMPTS", DefaultKafkaMaxAttempts),
+		KafkaMaxInFlight:    getIntEnv("KAFKA_MAX_IN_FLIGHT", DefaultKafkaMaxInFlight),
+		RequestTimeout:      getDurationEnv("REQUEST_TIMEOUT", DefaultRequestTimeout),
 		RedisAddr:           getEnv("REDIS_ADDR", DefaultRedisAddr),
 		RedisPassword:       os.Getenv("REDIS_PASSWORD"),
 		RedisDB:             getIntEnv("REDIS_DB", 0),
