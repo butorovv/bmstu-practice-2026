@@ -110,6 +110,19 @@ Message:
 }
 ```
 
+DLQ Message (`telemetry.dlq`):
+
+``` json
+{
+  "reason":"...",
+  "timestamp":"...",
+  "source_topic":"telemetry.raw",
+  "source_partition":0,
+  "source_offset":0,
+  "payload_base64":"..."
+}
+```
+
 ------------------------------------------------------------------------
 
 # Redis
@@ -138,17 +151,24 @@ Rate Limiting
 
 Sliding Window
 
-    window:{patient_id}:heart_rate
+    processing:window:{patient_id}
+    processing:window:{patient_id}:events
 
-TTL: 2 минуты.
+TTL: 5 минут.
 
 Хранит последние 60 секунд измерений.
+
+`processing:window:{patient_id}` is a Redis Sorted Set:
+score = unix timestamp, member = event_id.
+
+`processing:window:{patient_id}:events` is a Redis Hash:
+field = event_id, value = serialized telemetry event.
 
 Detector анализирует окно и принимает решение о создании Alert.
 
 Alert Deduplication
 
-    alert:{patient_id}:HIGH_HEART_RATE
+    processing:alert:dedup:{patient_id}:HIGH_HEART_RATE
 
 TTL: 5 минут.
 

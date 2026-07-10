@@ -1,0 +1,8 @@
+/bin/
+/ingestion
+
+*.test
+coverage.out
+
+README.md
+.gocache/
