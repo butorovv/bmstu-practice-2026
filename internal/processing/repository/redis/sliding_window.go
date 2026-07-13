@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/usecase"
 	goredis "github.com/redis/go-redis/v9"
@@ -28,20 +29,30 @@ type slidingWindowRedisClient interface {
 }
 
 type SlidingWindowRepository struct {
-	client slidingWindowRedisClient
-	ttl    time.Duration
+	client  slidingWindowRedisClient
+	ttl     time.Duration
+	metrics metrics.Recorder
 }
 
 var _ usecase.SlidingWindow = (*SlidingWindowRepository)(nil)
 
-func NewSlidingWindowRepository(client slidingWindowRedisClient, ttl time.Duration) *SlidingWindowRepository {
+func NewSlidingWindowRepository(
+	client slidingWindowRedisClient,
+	ttl time.Duration,
+	recorders ...metrics.Recorder,
+) *SlidingWindowRepository {
 	if ttl <= 0 {
 		ttl = DefaultWindowTTL
 	}
+	var recorder metrics.Recorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
 
 	return &SlidingWindowRepository{
-		client: client,
-		ttl:    ttl,
+		client:  client,
+		ttl:     ttl,
+		metrics: recorder,
 	}
 }
 
@@ -49,6 +60,11 @@ func (r *SlidingWindowRepository) Add(
 	ctx context.Context,
 	event model.TelemetryEvent,
 ) ([]model.TelemetryEvent, error) {
+	startedAt := time.Now()
+	defer func() {
+		r.observeRedis("sliding_window_add", time.Since(startedAt))
+	}()
+
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return nil, err
@@ -161,4 +177,16 @@ func slidingWindowDataKey(patientID string) string {
 
 func exclusiveScore(score int64) string {
 	return fmt.Sprintf("(%d", score)
+}
+
+func (r *SlidingWindowRepository) observeRedis(operation string, duration time.Duration) {
+	if r.metrics == nil {
+		return
+	}
+
+	r.metrics.ObserveHistogram(
+		"processing_redis_duration_seconds",
+		metrics.Labels{"operation": operation},
+		duration.Seconds(),
+	)
 }

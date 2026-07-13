@@ -1,12 +1,15 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/detector"
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/validator"
 )
@@ -102,6 +105,33 @@ func TestProcessingServiceProcessSustainedHighHeartRateCreatesAlert(t *testing.T
 	if deduplicator.calls != 1 {
 		t.Fatalf("deduplicator calls = %d, want 1", deduplicator.calls)
 	}
+}
+
+func TestProcessingServiceRecordsAlertAndWindowMetrics(t *testing.T) {
+	registry := metrics.NewRegistry()
+	telemetryRepo := &fakeTelemetryRepository{}
+	alertRepo := &fakeAlertRepository{}
+	latest := validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime().Add(time.Minute), "event-003")
+	service := NewProcessingServiceWithMetrics(
+		telemetryRepo,
+		alertRepo,
+		detector.New(),
+		&fakeSlidingWindow{events: []model.TelemetryEvent{
+			validTelemetryEventAt(detector.HighHeartRateThreshold+1, baseTime(), "event-001"),
+			latest,
+		}},
+		&fakeAlertDeduplicator{reserved: true},
+		registry,
+	)
+
+	if _, err := service.Process(context.Background(), latest); err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+
+	body := renderMetrics(t, registry)
+	assertMetricsTextContains(t, body, `processing_alerts_created_total{type="HIGH_HEART_RATE"} 1`)
+	assertMetricsTextContains(t, body, `processing_sliding_window_events_current 2`)
+	assertMetricsTextContains(t, body, `processing_processing_duration_seconds_count 1`)
 }
 
 func TestProcessingServiceProcessDeduplicatedAlertDoesNotSaveAlert(t *testing.T) {
@@ -364,4 +394,23 @@ func (d *fakeAlertDeduplicator) Reserve(_ context.Context, _ string, _ string) (
 func (d *fakeAlertDeduplicator) Release(_ context.Context, _ string, _ string) error {
 	d.releaseCalls++
 	return d.releaseErr
+}
+
+func renderMetrics(t *testing.T, registry *metrics.Registry) string {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	if _, err := registry.WriteTo(&buffer); err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+
+	return buffer.String()
+}
+
+func assertMetricsTextContains(t *testing.T, body string, want string) {
+	t.Helper()
+
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics body does not contain %q:\n%s", want, body)
+	}
 }

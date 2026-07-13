@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/validator"
 )
@@ -76,6 +77,7 @@ type ProcessingService struct {
 	window        SlidingWindow
 	deduplicator  AlertDeduplicator
 	dedupWindow   time.Duration
+	metrics       metrics.Recorder
 }
 
 func NewProcessingService(
@@ -101,12 +103,41 @@ func NewProcessingService(
 	}
 }
 
+func NewProcessingServiceWithMetrics(
+	telemetryRepo TelemetryWriter,
+	alertRepo AlertWriter,
+	detector Detector,
+	window SlidingWindow,
+	deduplicator AlertDeduplicator,
+	recorder metrics.Recorder,
+	dedupWindow ...time.Duration,
+) *ProcessingService {
+	service := NewProcessingService(
+		telemetryRepo,
+		alertRepo,
+		detector,
+		window,
+		deduplicator,
+		dedupWindow...,
+	)
+	service.metrics = recorder
+
+	return service
+}
+
 func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEvent) (*ProcessingResult, error) {
+	startedAt := time.Now()
+	defer func() {
+		s.observeHistogram("processing_processing_duration_seconds", nil, time.Since(startedAt))
+	}()
+
 	if err := validator.ValidateTelemetryEvent(event); err != nil {
+		s.recordError("validate")
 		return nil, fmt.Errorf("validate telemetry event: %w", err)
 	}
 
 	if err := s.telemetryRepo.SaveTelemetry(ctx, event); err != nil {
+		s.recordError("postgres")
 		return nil, fmt.Errorf("save telemetry: %w", err)
 	}
 
@@ -116,8 +147,10 @@ func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEv
 
 	window, err := s.window.Add(ctx, event)
 	if err != nil {
+		s.recordError("redis")
 		return nil, fmt.Errorf("update sliding window: %w", err)
 	}
+	s.setGauge("processing_sliding_window_events_current", nil, float64(len(window)))
 
 	alert, ok := s.detector.Detect(window, event)
 	if !ok {
@@ -126,6 +159,7 @@ func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEv
 
 	reserved, err := s.deduplicator.Reserve(ctx, event.PatientID, alert.Type)
 	if err != nil {
+		s.recordError("redis")
 		return nil, fmt.Errorf("reserve alert deduplication: %w", err)
 	}
 	if !reserved {
@@ -136,6 +170,7 @@ func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEv
 			time.Now().UTC().Add(-s.dedupWindow),
 		)
 		if err != nil {
+			s.recordError("postgres")
 			return nil, fmt.Errorf("check recent alert: %w", err)
 		}
 		if hasAlert {
@@ -143,19 +178,23 @@ func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEv
 		}
 
 		if err := s.alertRepo.SaveAlert(ctx, alert); err != nil {
+			s.recordError("postgres")
 			return nil, fmt.Errorf("save alert after dedup recovery: %w", err)
 		}
 
 		result.AlertCreated = true
 		result.Alert = &alert
+		s.recordAlert(alert.Type)
 
 		return result, nil
 	}
 
 	if err := s.alertRepo.SaveAlert(ctx, alert); err != nil {
+		s.recordError("postgres")
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer cancel()
 		if releaseErr := s.deduplicator.Release(releaseCtx, event.PatientID, alert.Type); releaseErr != nil {
+			s.recordError("redis")
 			return nil, fmt.Errorf("save alert: %w; release alert deduplication: %v", err, releaseErr)
 		}
 
@@ -164,6 +203,45 @@ func (s *ProcessingService) Process(ctx context.Context, event model.TelemetryEv
 
 	result.AlertCreated = true
 	result.Alert = &alert
+	s.recordAlert(alert.Type)
 
 	return result, nil
+}
+
+func (s *ProcessingService) recordError(stage string) {
+	if s.metrics == nil {
+		return
+	}
+
+	s.metrics.IncCounter("processing_errors_total", metrics.Labels{"stage": stage})
+}
+
+func (s *ProcessingService) recordAlert(alertType string) {
+	if s.metrics == nil {
+		return
+	}
+
+	s.metrics.IncCounter("processing_alerts_created_total", metrics.Labels{"type": alertType})
+}
+
+func (s *ProcessingService) observeHistogram(name string, labels metrics.Labels, duration time.Duration) {
+	if s.metrics == nil {
+		return
+	}
+	if labels == nil {
+		labels = metrics.Labels{}
+	}
+
+	s.metrics.ObserveHistogram(name, labels, duration.Seconds())
+}
+
+func (s *ProcessingService) setGauge(name string, labels metrics.Labels, value float64) {
+	if s.metrics == nil {
+		return
+	}
+	if labels == nil {
+		labels = metrics.Labels{}
+	}
+
+	s.metrics.SetGauge(name, labels, value)
 }

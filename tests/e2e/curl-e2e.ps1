@@ -385,6 +385,7 @@ $script:BaseTime = [DateTime]::UtcNow.Date.AddHours(12)
 $telemetryUrl = Join-Url -BaseUrl $IngestionBaseUrl -Path "/api/v1/telemetry"
 $ingestionHealthUrl = Join-Url -BaseUrl $IngestionBaseUrl -Path "/health"
 $processingHealthUrl = Join-Url -BaseUrl $ProcessingBaseUrl -Path "/health"
+$processingMetricsUrl = Join-Url -BaseUrl $ProcessingBaseUrl -Path "/metrics"
 $alertsUrl = Join-Url -BaseUrl $ProcessingBaseUrl -Path "/alerts"
 
 if ($Compose) {
@@ -424,6 +425,19 @@ Run-Test "processing health is ok" {
         Assert-JsonEquals -Response $response -Name "service" -ExpectedValue "processing"
         return $true
     } | Out-Null
+}
+
+Run-Test "processing exposes prometheus metrics" {
+    $response = Invoke-CurlJson -Method GET -Url $processingMetricsUrl
+
+    Assert-Status -Response $response -ExpectedStatus 200
+    $contentType = Get-ResponseHeader -Response $response -Name "Content-Type"
+    if ([string]::IsNullOrWhiteSpace($contentType) -or $contentType -notlike "*text/plain*") {
+        throw "Expected Prometheus text content type, got '$contentType'"
+    }
+    if ($response.Body -notlike "*processing_kafka_messages_total*") {
+        throw "Expected processing_kafka_messages_total in /metrics body. Body: $($response.Body)"
+    }
 }
 
 Run-Test "kafka publishing path is ready" {

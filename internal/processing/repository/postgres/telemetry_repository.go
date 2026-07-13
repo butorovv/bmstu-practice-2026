@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/usecase"
 )
@@ -18,16 +19,26 @@ const (
 )
 
 type TelemetryRepository struct {
-	db executor
+	db      executor
+	metrics metrics.Recorder
 }
 
 var _ usecase.TelemetryRepository = (*TelemetryRepository)(nil)
 
-func NewTelemetryRepository(db executor) *TelemetryRepository {
-	return &TelemetryRepository{db: db}
+func NewTelemetryRepository(db executor, recorders ...metrics.Recorder) *TelemetryRepository {
+	var recorder metrics.Recorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+
+	return &TelemetryRepository{
+		db:      db,
+		metrics: recorder,
+	}
 }
 
 func (r *TelemetryRepository) SaveTelemetry(ctx context.Context, event model.TelemetryEvent) error {
+	startedAt := time.Now()
 	_, err := r.db.Exec(
 		ctx,
 		`INSERT INTO telemetry (
@@ -48,6 +59,7 @@ func (r *TelemetryRepository) SaveTelemetry(ctx context.Context, event model.Tel
 		nullableInt(event.SpO2),
 		nullableFloat(event.Temperature),
 	)
+	r.observeWrite("save_telemetry", time.Since(startedAt))
 
 	return err
 }
@@ -171,4 +183,16 @@ func nullableFloat(value *float64) interface{} {
 	}
 
 	return *value
+}
+
+func (r *TelemetryRepository) observeWrite(operation string, duration time.Duration) {
+	if r.metrics == nil {
+		return
+	}
+
+	r.metrics.ObserveHistogram(
+		"processing_postgres_write_duration_seconds",
+		metrics.Labels{"operation": operation},
+		duration.Seconds(),
+	)
 }

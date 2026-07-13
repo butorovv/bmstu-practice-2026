@@ -32,13 +32,16 @@ func NewHandler(telemetryRepo usecase.TelemetryReader, alertRepo usecase.AlertRe
 	}
 }
 
-func NewRouter(handler *Handler) nethttp.Handler {
+func NewRouter(handler *Handler, metricsHandlers ...nethttp.Handler) nethttp.Handler {
 	mux := nethttp.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
 	mux.HandleFunc("GET /alerts", handler.Alerts)
 	mux.HandleFunc("GET /alerts/{patient_id}", handler.PatientAlerts)
 	mux.HandleFunc("GET /telemetry", handler.Telemetry)
 	mux.HandleFunc("GET /telemetry/{patient_id}", handler.PatientTelemetry)
+	if len(metricsHandlers) > 0 && metricsHandlers[0] != nil {
+		mux.Handle("GET /metrics", metricsHandlers[0])
+	}
 	return mux
 }
 
