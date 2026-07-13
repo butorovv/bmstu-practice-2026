@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	kafkago "github.com/segmentio/kafka-go"
 )
 
@@ -28,6 +29,7 @@ type ConsumerConfig struct {
 	DLQTopic     string
 	GroupID      string
 	RetryBackoff time.Duration
+	Metrics      metrics.Recorder
 }
 
 type messageReader interface {
@@ -53,6 +55,7 @@ type Consumer struct {
 	retryBackoff time.Duration
 	closeOnce    sync.Once
 	closeErr     error
+	metrics      metrics.Recorder
 }
 
 func NewConsumer(cfg ConsumerConfig, handler *MessageHandler, logger *log.Logger) *Consumer {
@@ -93,6 +96,7 @@ func NewConsumer(cfg ConsumerConfig, handler *MessageHandler, logger *log.Logger
 		dlqTopic:     cfg.DLQTopic,
 		groupID:      cfg.GroupID,
 		retryBackoff: cfg.RetryBackoff,
+		metrics:      cfg.Metrics,
 	}
 }
 
@@ -156,6 +160,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return nil
 			}
 
+			c.recordError("fetch")
 			c.logger.Printf("failed to fetch kafka message topic=%s group_id=%s error=%v", c.topic, c.groupID, err)
 			if !sleepContext(ctx, c.retryBackoff) {
 				return nil
@@ -225,9 +230,12 @@ func (c *Consumer) topicsToEnsure() []string {
 }
 
 func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Message) error {
+	c.recordLag(message)
+
 	for {
 		result, err := c.handler.Handle(ctx, message.Value)
 		if err == nil {
+			c.recordMessage("processed")
 			c.logger.Printf(
 				"telemetry event processed device_id=%s patient_id=%s event_id=%s topic=%s partition=%d offset=%d",
 				result.Event.DeviceID,
@@ -259,6 +267,7 @@ func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Mes
 				message.Offset,
 				err,
 			)
+			c.recordError("decode")
 			if err := c.sendToDLQWithRetry(ctx, message, err); err != nil {
 				if isContextDone(ctx) {
 					return nil
@@ -291,6 +300,7 @@ func (c *Consumer) handleFetchedMessage(ctx context.Context, message kafkago.Mes
 			message.Offset,
 			err,
 		)
+		c.recordMessage("error")
 		if !sleepContext(ctx, c.retryBackoff) {
 			return nil
 		}
@@ -312,6 +322,7 @@ func (c *Consumer) sendToDLQWithRetry(ctx context.Context, message kafkago.Messa
 				message.Offset,
 				err,
 			)
+			c.recordError("dlq")
 			if !sleepContext(ctx, c.retryBackoff) {
 				return ctx.Err()
 			}
@@ -339,7 +350,7 @@ func (c *Consumer) sendToDLQ(ctx context.Context, message kafkago.Message, reaso
 		return err
 	}
 
-	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+	if err := c.dlqWriter.WriteMessages(ctx, kafkago.Message{
 		Key:   message.Key,
 		Value: payload,
 		Time:  time.Now().UTC(),
@@ -349,7 +360,14 @@ func (c *Consumer) sendToDLQ(ctx context.Context, message kafkago.Message, reaso
 			{Key: "source_offset", Value: []byte(strconv.FormatInt(message.Offset, 10))},
 			{Key: "reason", Value: []byte(reason.Error())},
 		},
-	})
+	}); err != nil {
+		return err
+	}
+
+	c.recordMessage("dlq")
+	c.recordDLQ(reason)
+
+	return nil
 }
 
 type deadLetterMessage struct {
@@ -368,6 +386,8 @@ func (c *Consumer) commitWithRetry(ctx context.Context, message kafkago.Message)
 				return nil
 			}
 
+			c.recordCommit("error")
+			c.recordError("commit")
 			c.logger.Printf(
 				"failed to commit kafka message topic=%s partition=%d offset=%d error=%v",
 				message.Topic,
@@ -381,7 +401,69 @@ func (c *Consumer) commitWithRetry(ctx context.Context, message kafkago.Message)
 			continue
 		}
 
+		c.recordCommit("success")
 		return nil
+	}
+}
+
+func (c *Consumer) recordMessage(status string) {
+	if c.metrics == nil {
+		return
+	}
+
+	c.metrics.IncCounter("processing_kafka_messages_total", metrics.Labels{"status": status})
+}
+
+func (c *Consumer) recordCommit(status string) {
+	if c.metrics == nil {
+		return
+	}
+
+	c.metrics.IncCounter("processing_kafka_commits_total", metrics.Labels{"status": status})
+}
+
+func (c *Consumer) recordDLQ(reason error) {
+	if c.metrics == nil {
+		return
+	}
+
+	c.metrics.IncCounter("processing_dlq_messages_total", metrics.Labels{
+		"reason": dlqReason(reason),
+	})
+}
+
+func (c *Consumer) recordError(stage string) {
+	if c.metrics == nil {
+		return
+	}
+
+	c.metrics.IncCounter("processing_errors_total", metrics.Labels{"stage": stage})
+}
+
+func (c *Consumer) recordLag(message kafkago.Message) {
+	if c.metrics == nil || message.HighWaterMark <= 0 {
+		return
+	}
+
+	lag := message.HighWaterMark - message.Offset - 1
+	if lag < 0 {
+		lag = 0
+	}
+
+	c.metrics.SetGauge("processing_kafka_consumer_lag", metrics.Labels{
+		"topic":     message.Topic,
+		"partition": strconv.Itoa(message.Partition),
+	}, float64(lag))
+}
+
+func dlqReason(reason error) string {
+	switch {
+	case errors.Is(reason, ErrDecodeMessage):
+		return "decode"
+	case errors.Is(reason, ErrInvalidTelemetryEvent):
+		return "validation"
+	default:
+		return "other"
 	}
 }
 
