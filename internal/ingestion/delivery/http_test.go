@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/publisher"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/usecase"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/validator"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type fakePublisher struct {
@@ -334,6 +337,182 @@ func TestHealthReturnsOK(t *testing.T) {
 	}
 	if response.Status != "ok" {
 		t.Fatalf("response status = %q, want %q", response.Status, "ok")
+	}
+}
+
+func TestReadyReturnsOKWhenDependenciesAreAvailable(t *testing.T) {
+	handler := NewHandlerWithOptions(
+		&fakePublisher{},
+		validator.New(),
+		&fakeIdempotencyRepository{reserved: true},
+		allowingRateLimiter(),
+		HandlerOptions{ReadinessChecks: map[string]ReadinessCheck{
+			"kafka": func(context.Context) error { return nil },
+			"redis": func(context.Context) error { return nil },
+		}},
+	)
+	router := NewRouter(handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var response readinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Status != "ready" {
+		t.Fatalf("response status = %q, want ready", response.Status)
+	}
+	if response.Checks["kafka"] != "ok" || response.Checks["redis"] != "ok" {
+		t.Fatalf("readiness checks = %v", response.Checks)
+	}
+}
+
+func TestReadyReturnsServiceUnavailableWhenDependencyIsUnavailable(t *testing.T) {
+	handler := NewHandlerWithOptions(
+		&fakePublisher{},
+		validator.New(),
+		&fakeIdempotencyRepository{reserved: true},
+		allowingRateLimiter(),
+		HandlerOptions{ReadinessChecks: map[string]ReadinessCheck{
+			"kafka": func(context.Context) error { return errors.New("Kafka unavailable") },
+			"redis": func(context.Context) error { return nil },
+		}},
+	)
+	router := NewRouter(handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	var response readinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Status != "not_ready" {
+		t.Fatalf("response status = %q, want not_ready", response.Status)
+	}
+	if response.Checks["kafka"] != "unavailable" || response.Checks["redis"] != "ok" {
+		t.Fatalf("readiness checks = %v", response.Checks)
+	}
+}
+
+func TestReadyReturnsServiceUnavailableWhenCheckTimesOut(t *testing.T) {
+	blocked := make(chan struct{})
+	defer close(blocked)
+
+	handler := NewHandlerWithOptions(
+		&fakePublisher{},
+		validator.New(),
+		&fakeIdempotencyRepository{reserved: true},
+		allowingRateLimiter(),
+		HandlerOptions{
+			ReadinessTimeout: time.Millisecond,
+			ReadinessChecks: map[string]ReadinessCheck{
+				"kafka": func(context.Context) error {
+					<-blocked
+					return nil
+				},
+			},
+		},
+	)
+	router := NewRouter(handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	var response readinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Checks["kafka"] != "unavailable" {
+		t.Fatalf("readiness checks = %v", response.Checks)
+	}
+}
+
+func TestMetricsExposeHTTPAndPublishingObservations(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := NewMetrics(registry)
+	handler := NewHandlerWithOptions(
+		&fakePublisher{},
+		validator.New(),
+		&fakeIdempotencyRepository{reserved: true},
+		allowingRateLimiter(),
+		HandlerOptions{Metrics: metrics},
+	)
+	router := NewRouter(handler, MetricsHandler(registry))
+
+	telemetryRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/telemetry",
+		bytes.NewBufferString(validTelemetryJSON()),
+	)
+	telemetryResponse := httptest.NewRecorder()
+	router.ServeHTTP(telemetryResponse, telemetryRequest)
+	if telemetryResponse.Code != http.StatusAccepted {
+		t.Fatalf("telemetry status = %d, want %d", telemetryResponse.Code, http.StatusAccepted)
+	}
+
+	metricsRequest := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsResponse := httptest.NewRecorder()
+	router.ServeHTTP(metricsResponse, metricsRequest)
+
+	if metricsResponse.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, want %d", metricsResponse.Code, http.StatusOK)
+	}
+	body := metricsResponse.Body.String()
+	for _, want := range []string{
+		`ingestion_http_requests_total{method="POST",route="POST /api/v1/telemetry",status="202"} 1`,
+		`ingestion_telemetry_events_published_total 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body does not contain %q\n%s", want, body)
+		}
+	}
+}
+
+func TestRouterWritesStructuredRequestLog(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	handler := NewHandlerWithOptions(
+		&fakePublisher{},
+		validator.New(),
+		&fakeIdempotencyRepository{reserved: true},
+		allowingRateLimiter(),
+		HandlerOptions{Logger: logger},
+	)
+	router := NewRouter(handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	logLine := output.String()
+	for _, want := range []string{
+		`"msg":"http request completed"`,
+		`"method":"GET"`,
+		`"route":"GET /health"`,
+		`"status":200`,
+	} {
+		if !strings.Contains(logLine, want) {
+			t.Fatalf("structured log does not contain %q: %s", want, logLine)
+		}
 	}
 }
 

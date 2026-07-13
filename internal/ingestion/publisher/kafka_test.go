@@ -156,3 +156,17 @@ func TestKafkaPublisherCloseClosesWriter(t *testing.T) {
 		t.Fatal("writer was not closed")
 	}
 }
+
+func TestKafkaPublisherReadyUsesConfiguredCheck(t *testing.T) {
+	wantErr := errors.New("Kafka unavailable")
+	pub := newKafkaPublisher(&fakeMessageWriter{}, time.Second)
+	pub.readinessCheck = func(context.Context) error {
+		return wantErr
+	}
+
+	err := pub.Ready(context.Background())
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Ready() error = %v, want %v", err, wantErr)
+	}
+}
