@@ -53,6 +53,7 @@ type readinessResponse struct {
 const (
 	idempotencyReleaseTimeout = time.Second
 	defaultReadinessTimeout   = 2 * time.Second
+	backpressureRetryAfter    = time.Second
 )
 
 type ReadinessCheck func(ctx context.Context) error
@@ -232,6 +233,25 @@ func (h *Handler) AcceptTelemetry(w http.ResponseWriter, r *http.Request) {
 		if err := h.publisher.Publish(ctx, event); err != nil {
 			h.metrics.observePublishError()
 			_ = h.releaseIdempotency(ctx, batch.DeviceID, batch.BatchID)
+			if errors.Is(err, publisher.ErrBackpressure) {
+				h.metrics.observeBackpressure()
+				retryAfter := int64(backpressureRetryAfter / time.Second)
+				w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+				h.logger.WarnContext(
+					ctx,
+					"telemetry batch rejected by publisher backpressure",
+					"device_id", batch.DeviceID,
+					"batch_id", batch.BatchID,
+					"retry_after_seconds", retryAfter,
+				)
+				writeError(
+					w,
+					http.StatusTooManyRequests,
+					"publisher_backpressure",
+					"publisher is busy; retry later",
+				)
+				return
+			}
 			h.logger.ErrorContext(
 				ctx,
 				"telemetry event publication failed",

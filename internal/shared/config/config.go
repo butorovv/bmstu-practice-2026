@@ -23,6 +23,7 @@ const (
 	DefaultKafkaMaxInFlight    = 32
 	DefaultRequestTimeout      = 10 * time.Second
 	DefaultReadinessTimeout    = 2 * time.Second
+	DefaultRateLimitBurst      = 2
 	DefaultRedisAddr           = "localhost:6379"
 	DefaultPostgresHost        = "localhost"
 	DefaultPostgresPort        = 5432
@@ -45,6 +46,7 @@ type Config struct {
 	KafkaMaxInFlight    int
 	RequestTimeout      time.Duration
 	ReadinessTimeout    time.Duration
+	RateLimitBurst      int
 	RedisAddr           string
 	RedisPassword       string
 	RedisDB             int
@@ -117,6 +119,7 @@ func Load() Config {
 		KafkaMaxInFlight:    getIntEnv("KAFKA_MAX_IN_FLIGHT", DefaultKafkaMaxInFlight),
 		RequestTimeout:      getDurationEnv("REQUEST_TIMEOUT", DefaultRequestTimeout),
 		ReadinessTimeout:    getDurationEnv("READINESS_TIMEOUT", DefaultReadinessTimeout),
+		RateLimitBurst:      getIntEnv("RATE_LIMIT_BURST", DefaultRateLimitBurst),
 		RedisAddr:           redisConfig.Addr,
 		RedisPassword:       redisConfig.Password,
 		RedisDB:             redisConfig.DB,

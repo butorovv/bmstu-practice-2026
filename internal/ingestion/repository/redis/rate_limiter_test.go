@@ -47,13 +47,16 @@ func TestRateLimiterAllowsBatchUsingContractKey(t *testing.T) {
 	if len(client.keys) != 1 || client.keys[0] != "rate:device-001" {
 		t.Fatalf("keys = %v, want [rate:device-001]", client.keys)
 	}
-	if len(client.args) != 1 || client.args[0] != int64(5000) {
-		t.Fatalf("args = %v, want [5000]", client.args)
+	if len(client.args) != 3 ||
+		client.args[0] != int64(5000) ||
+		client.args[1] != RateLimitBurst ||
+		client.args[2] != int64(10000) {
+		t.Fatalf("args = %v, want [5000 2 10000]", client.args)
 	}
 }
 
 func TestRateLimiterRejectsBatchWithRetryAfter(t *testing.T) {
-	client := &fakeRateLimitRedisClient{result: []interface{}{int64(0), int64(4)}}
+	client := &fakeRateLimitRedisClient{result: []interface{}{int64(0), int64(4000)}}
 	limiter := NewRateLimiter(client)
 
 	decision, err := limiter.Allow(context.Background(), "device-001")
@@ -66,6 +69,18 @@ func TestRateLimiterRejectsBatchWithRetryAfter(t *testing.T) {
 	}
 	if decision.RetryAfter != 4*time.Second {
 		t.Fatalf("RetryAfter = %v, want 4s", decision.RetryAfter)
+	}
+}
+
+func TestRateLimiterUsesConfiguredBurst(t *testing.T) {
+	client := &fakeRateLimitRedisClient{result: []interface{}{int64(1), int64(0)}}
+	limiter := NewRateLimiterWithBurst(client, 4)
+
+	if _, err := limiter.Allow(context.Background(), "device-001"); err != nil {
+		t.Fatalf("Allow() error = %v", err)
+	}
+	if client.args[1] != 4 || client.args[2] != int64(20000) {
+		t.Fatalf("args = %v, want burst=4 ttl=20000", client.args)
 	}
 }
 

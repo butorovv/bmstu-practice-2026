@@ -181,6 +181,28 @@ func TestAcceptTelemetryReturnsServiceUnavailableForPublisherError(t *testing.T)
 	}
 }
 
+func TestAcceptTelemetryReturnsTooManyRequestsForPublisherBackpressure(t *testing.T) {
+	pub := &fakePublisher{err: publisher.ErrBackpressure}
+	idempotency := &fakeIdempotencyRepository{reserved: true}
+	router := NewRouter(NewHandler(pub, validator.New(), idempotency, allowingRateLimiter()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telemetry", bytes.NewBufferString(validTelemetryJSON()))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+	if retryAfter := rec.Header().Get("Retry-After"); retryAfter != "1" {
+		t.Fatalf("Retry-After = %q, want 1", retryAfter)
+	}
+	assertErrorCode(t, rec, "publisher_backpressure")
+	if idempotency.releaseCalls != 1 {
+		t.Fatalf("idempotency release calls = %d, want 1", idempotency.releaseCalls)
+	}
+}
+
 func TestAcceptTelemetryReturnsServiceUnavailableWhenRequestTimesOut(t *testing.T) {
 	pub := &fakePublisher{waitForContext: true}
 	idempotency := &fakeIdempotencyRepository{reserved: true}

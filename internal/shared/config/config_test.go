@@ -17,6 +17,7 @@ func TestLoadCombinesKafkaAndRedisConfig(t *testing.T) {
 	t.Setenv("KAFKA_MAX_IN_FLIGHT", "8")
 	t.Setenv("REQUEST_TIMEOUT", "3s")
 	t.Setenv("READINESS_TIMEOUT", "1500ms")
+	t.Setenv("RATE_LIMIT_BURST", "4")
 	t.Setenv("REDIS_ADDR", "redis:6379")
 	t.Setenv("REDIS_PASSWORD", "secret")
 	t.Setenv("REDIS_DB", "2")
@@ -50,6 +51,9 @@ func TestLoadCombinesKafkaAndRedisConfig(t *testing.T) {
 	}
 	if cfg.ReadinessTimeout != 1500*time.Millisecond {
 		t.Fatalf("ReadinessTimeout = %v, want 1.5s", cfg.ReadinessTimeout)
+	}
+	if cfg.RateLimitBurst != 4 {
+		t.Fatalf("RateLimitBurst = %d, want 4", cfg.RateLimitBurst)
 	}
 	if cfg.RedisAddr != "redis:6379" || cfg.RedisPassword != "secret" || cfg.RedisDB != 2 {
 		t.Fatalf("Redis config = %q, %q, %d", cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)

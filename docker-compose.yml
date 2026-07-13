@@ -87,6 +87,7 @@ services:
       KAFKA_MAX_IN_FLIGHT: "32"
       REQUEST_TIMEOUT: "10s"
       READINESS_TIMEOUT: "2s"
+      RATE_LIMIT_BURST: "2"
       REDIS_ADDR: "redis:6379"
       REDIS_PASSWORD: ""
       REDIS_DB: "0"
@@ -111,5 +112,19 @@ services:
     ports:
       - "8081:8081"
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
 volumes:
   postgres-data:
+  prometheus-data:

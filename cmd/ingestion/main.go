@@ -30,7 +30,7 @@ func main() {
 
 	redisClient := redisrepo.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	idempotencyRepository := redisrepo.NewIdempotencyRepository(redisClient)
-	rateLimiter := redisrepo.NewRateLimiter(redisClient)
+	rateLimiter := redisrepo.NewRateLimiterWithBurst(redisClient, cfg.RateLimitBurst)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	metrics := delivery.NewMetrics(registry)

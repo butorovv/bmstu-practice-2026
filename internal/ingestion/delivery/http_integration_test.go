@@ -154,8 +154,17 @@ func TestIngestionKafkaRedisIntegration(t *testing.T) {
 		deviceID := "integration-rate-device-" + testID
 		patientID := "integration-rate-patient-" + testID
 		firstBatchID := "integration-rate-first-" + testID
-		secondBatchID := "integration-rate-second-" + testID
-		cleanupIngestionRedisKeys(t, redisClient, deviceID, firstBatchID, secondBatchID)
+		burstBatchID := "integration-rate-burst-" + testID
+		limitedBatchID := "integration-rate-limited-" + testID
+		cleanupIngestionRedisKeys(t, redisClient, deviceID, firstBatchID, burstBatchID, limitedBatchID)
+		if err := redisClient.Set(
+			context.Background(),
+			"rate:"+deviceID,
+			"1",
+			redisrepo.RateLimitInterval,
+		).Err(); err != nil {
+			t.Fatalf("seed legacy rate limit key: %v", err)
+		}
 		before := topicHighWatermarks(t, brokers[0])
 
 		firstResponse, firstBody := integrationRequest(
@@ -174,21 +183,32 @@ func TestIngestionKafkaRedisIntegration(t *testing.T) {
 			server.Client(),
 			http.MethodPost,
 			server.URL+"/api/v1/telemetry",
-			integrationBatch(deviceID, patientID, secondBatchID),
+			integrationBatch(deviceID, patientID, burstBatchID),
 		)
-		if secondResponse.StatusCode != http.StatusTooManyRequests {
-			t.Fatalf("second status = %d, want %d; body=%s", secondResponse.StatusCode, http.StatusTooManyRequests, secondBody)
+		if secondResponse.StatusCode != http.StatusAccepted {
+			t.Fatalf("burst status = %d, want %d; body=%s", secondResponse.StatusCode, http.StatusAccepted, secondBody)
 		}
-		if secondResponse.Header.Get("Retry-After") == "" {
+
+		limitedResponse, limitedBody := integrationRequest(
+			t,
+			server.Client(),
+			http.MethodPost,
+			server.URL+"/api/v1/telemetry",
+			integrationBatch(deviceID, patientID, limitedBatchID),
+		)
+		if limitedResponse.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("limited status = %d, want %d; body=%s", limitedResponse.StatusCode, http.StatusTooManyRequests, limitedBody)
+		}
+		if limitedResponse.Header.Get("Retry-After") == "" {
 			t.Fatal("Retry-After header is empty")
 		}
-		if code := integrationErrorCode(t, secondBody); code != "rate_limit_exceeded" {
+		if code := integrationErrorCode(t, limitedBody); code != "rate_limit_exceeded" {
 			t.Fatalf("error code = %q, want rate_limit_exceeded", code)
 		}
 
 		exists, err := redisClient.Exists(
 			context.Background(),
-			"idempotency:"+deviceID+":"+secondBatchID,
+			"idempotency:"+deviceID+":"+limitedBatchID,
 		).Result()
 		if err != nil {
 			t.Fatalf("check released idempotency key: %v", err)
@@ -196,13 +216,23 @@ func TestIngestionKafkaRedisIntegration(t *testing.T) {
 		if exists != 0 {
 			t.Fatal("rate-limited batch idempotency key was not released")
 		}
+		keyType, err := redisClient.Type(context.Background(), "rate:"+deviceID).Result()
+		if err != nil {
+			t.Fatalf("read rate limit key type: %v", err)
+		}
+		if keyType != "hash" {
+			t.Fatalf("rate limit key type = %q, want hash", keyType)
+		}
 
 		after := topicHighWatermarks(t, brokers[0])
 		messages := topicMessagesBetween(t, brokers[0], before, after)
 		if count := len(matchingIntegrationMessages(t, messages, firstBatchID+"-0")); count != 1 {
 			t.Fatalf("first batch Kafka messages = %d, want 1", count)
 		}
-		if count := len(matchingIntegrationMessages(t, messages, secondBatchID+"-0")); count != 0 {
+		if count := len(matchingIntegrationMessages(t, messages, burstBatchID+"-0")); count != 1 {
+			t.Fatalf("burst batch Kafka messages = %d, want 1", count)
+		}
+		if count := len(matchingIntegrationMessages(t, messages, limitedBatchID+"-0")); count != 0 {
 			t.Fatalf("rate-limited batch Kafka messages = %d, want 0", count)
 		}
 	})
