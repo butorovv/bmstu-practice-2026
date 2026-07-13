@@ -125,6 +125,33 @@ services:
     ports:
       - "9090:9090"
 
+  generator:
+    profiles: ["load"]
+    build:
+      context: .
+      dockerfile: deployments/docker/generator.Dockerfile
+    image: bmstu-practice-generator:local
+    depends_on:
+      ingestion:
+        condition: service_started
+      processing:
+        condition: service_started
+      prometheus:
+        condition: service_started
+    environment:
+      GENERATOR_TARGET_URL: "http://ingestion:8080/api/v1/telemetry"
+      GENERATOR_MODE: "${GENERATOR_MODE:-normal}"
+      GENERATOR_DEVICES: "${GENERATOR_DEVICES:-1000}"
+      GENERATOR_PATIENTS: "${GENERATOR_PATIENTS:-1000}"
+      GENERATOR_DURATION: "${GENERATOR_DURATION:-10m}"
+      GENERATOR_BATCH_SIZE: "${GENERATOR_BATCH_SIZE:-1}"
+      GENERATOR_MAX_BATCH_SIZE: "${GENERATOR_MAX_BATCH_SIZE:-10}"
+      GENERATOR_BASE_INTERVAL: "${GENERATOR_BASE_INTERVAL:-5s}"
+      GENERATOR_RPS_LIMIT: "${GENERATOR_RPS_LIMIT:-5000}"
+      GENERATOR_OUTPUT: "${GENERATOR_OUTPUT:-/results/run-001.json}"
+    volumes:
+      - ./results:/results
+
 volumes:
   postgres-data:
   prometheus-data:
