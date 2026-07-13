@@ -14,6 +14,7 @@ type Metrics struct {
 	httpDuration     *prometheus.HistogramVec
 	eventsPublished  prometheus.Counter
 	publishErrors    prometheus.Counter
+	backpressure     prometheus.Counter
 	readinessCheckUp *prometheus.GaugeVec
 }
 
@@ -40,6 +41,11 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			Name:      "telemetry_publish_errors_total",
 			Help:      "Total number of telemetry event publication failures.",
 		}),
+		backpressure: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "ingestion",
+			Name:      "publisher_backpressure_total",
+			Help:      "Total number of telemetry batches rejected due to publisher backpressure.",
+		}),
 		readinessCheckUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "ingestion",
 			Name:      "readiness_check_up",
@@ -52,6 +58,7 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 		metrics.httpDuration,
 		metrics.eventsPublished,
 		metrics.publishErrors,
+		metrics.backpressure,
 		metrics.readinessCheckUp,
 	)
 
@@ -80,6 +87,12 @@ func (m *Metrics) observePublishedEvent() {
 func (m *Metrics) observePublishError() {
 	if m != nil {
 		m.publishErrors.Inc()
+	}
+}
+
+func (m *Metrics) observeBackpressure() {
+	if m != nil {
+		m.backpressure.Inc()
 	}
 }
 
