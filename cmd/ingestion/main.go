@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -13,66 +14,103 @@ import (
 	redisrepo "github.com/butorovv/bmstu-practice-2026/internal/ingestion/repository/redis"
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/validator"
 	"github.com/butorovv/bmstu-practice-2026/internal/shared/config"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	cfg := config.Load()
-	pub, err := newPublisher(cfg)
+	pub, err := newPublisher(cfg, logger)
 	if err != nil {
-		log.Fatalf("failed to create publisher: %v", err)
+		logger.Error("failed to create publisher", "error", err)
+		os.Exit(1)
 	}
 
 	redisClient := redisrepo.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	idempotencyRepository := redisrepo.NewIdempotencyRepository(redisClient)
-	rateLimiter := redisrepo.NewRateLimiter(redisClient)
+	rateLimiter := redisrepo.NewRateLimiterWithBurst(redisClient, cfg.RateLimitBurst)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	metrics := delivery.NewMetrics(registry)
+	readinessChecks := map[string]delivery.ReadinessCheck{
+		"redis": func(ctx context.Context) error {
+			return redisClient.Ping(ctx).Err()
+		},
+	}
+	if readinessPublisher, ok := pub.(interface {
+		Ready(context.Context) error
+	}); ok {
+		readinessChecks["kafka"] = readinessPublisher.Ready
+	}
 
 	handler := delivery.NewHandlerWithOptions(
 		pub,
 		validator.New(),
 		idempotencyRepository,
 		rateLimiter,
-		delivery.HandlerOptions{RequestTimeout: cfg.RequestTimeout},
+		delivery.HandlerOptions{
+			RequestTimeout:   cfg.RequestTimeout,
+			ReadinessTimeout: cfg.ReadinessTimeout,
+			ReadinessChecks:  readinessChecks,
+			Logger:           logger,
+			Metrics:          metrics,
+		},
 	)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: delivery.NewRouter(handler),
+		Handler: delivery.NewRouter(handler, delivery.MetricsHandler(registry)),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("starting ingestion service on %s with publisher=%s", cfg.HTTPAddr, cfg.PublisherBackend)
+		logger.Info(
+			"starting ingestion service",
+			"address", cfg.HTTPAddr,
+			"publisher", cfg.PublisherBackend,
+		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("ingestion service stopped: %v", err)
+			serverErrors <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrors:
+		logger.Error("ingestion HTTP server stopped", "error", err)
+	}
 	stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("ingestion service shutdown failed: %v", err)
+		logger.Error("ingestion service shutdown failed", "error", err)
 	}
 	if err := closePublisher(pub); err != nil {
-		log.Printf("ingestion publisher close failed: %v", err)
+		logger.Error("ingestion publisher close failed", "error", err)
 	}
 	if err := redisClient.Close(); err != nil {
-		log.Printf("ingestion redis client close failed: %v", err)
+		logger.Error("ingestion redis client close failed", "error", err)
 	}
 
-	log.Print("ingestion service stopped")
+	logger.Info("ingestion service stopped")
 }
 
-func newPublisher(cfg config.Config) (publisher.Publisher, error) {
+func newPublisher(cfg config.Config, logger *slog.Logger) (publisher.Publisher, error) {
 	switch cfg.PublisherBackend {
 	case "", config.DefaultPublisherBackend:
 		return publisher.NewLogPublisher(), nil
 	case "kafka":
-		log.Printf("using kafka publisher brokers=%v topic=%s", cfg.KafkaBrokers, publisher.TelemetryRawTopic)
+		logger.Info(
+			"using Kafka publisher",
+			"brokers", cfg.KafkaBrokers,
+			"topic", publisher.TelemetryRawTopic,
+		)
 		return publisher.NewKafkaPublisherWithConfig(publisher.KafkaPublisherConfig{
 			Brokers:        cfg.KafkaBrokers,
 			PublishTimeout: cfg.KafkaPublishTimeout,

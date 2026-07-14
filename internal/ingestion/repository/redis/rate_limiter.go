@@ -10,22 +10,52 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-const RateLimitInterval = 5 * time.Second
+const (
+	RateLimitInterval = 5 * time.Second
+	RateLimitBurst    = 2
+)
 
 const tokenBucketScript = `
 local interval_ms = tonumber(ARGV[1])
-local acquired = redis.call("SET", KEYS[1], "1", "NX", "PX", interval_ms)
+local capacity = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
 
-if acquired then
-	return {1, 0}
+local key_type = redis.call("TYPE", KEYS[1])
+if type(key_type) == "table" then
+	key_type = key_type["ok"]
+end
+if key_type ~= "none" and key_type ~= "hash" then
+	redis.call("DEL", KEYS[1])
 end
 
-local ttl_ms = redis.call("PTTL", KEYS[1])
-if ttl_ms < 1 then
-	ttl_ms = interval_ms
+local redis_time = redis.call("TIME")
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local state = redis.call("HMGET", KEYS[1], "tokens", "refilled_at")
+local tokens = tonumber(state[1])
+local refilled_at = tonumber(state[2])
+
+if not tokens or not refilled_at then
+	tokens = capacity
+	refilled_at = now_ms
+else
+	local elapsed_ms = math.max(0, now_ms - refilled_at)
+	tokens = math.min(capacity, tokens + elapsed_ms / interval_ms)
+	refilled_at = now_ms
 end
 
-return {0, math.ceil(ttl_ms / 1000)}
+local allowed = 0
+local retry_after_ms = 0
+if tokens >= 1 then
+	tokens = tokens - 1
+	allowed = 1
+else
+	retry_after_ms = math.ceil((1 - tokens) * interval_ms)
+end
+
+redis.call("HSET", KEYS[1], "tokens", tokens, "refilled_at", refilled_at)
+redis.call("PEXPIRE", KEYS[1], ttl_ms)
+
+return {allowed, retry_after_ms}
 `
 
 type rateLimitRedisClient interface {
@@ -39,12 +69,21 @@ type rateLimitRedisClient interface {
 
 type RateLimiter struct {
 	client rateLimitRedisClient
+	burst  int
 }
 
 var _ usecase.RateLimiter = (*RateLimiter)(nil)
 
 func NewRateLimiter(client rateLimitRedisClient) *RateLimiter {
-	return &RateLimiter{client: client}
+	return NewRateLimiterWithBurst(client, RateLimitBurst)
+}
+
+func NewRateLimiterWithBurst(client rateLimitRedisClient, burst int) *RateLimiter {
+	if burst <= 0 {
+		burst = RateLimitBurst
+	}
+
+	return &RateLimiter{client: client, burst: burst}
 }
 
 func (l *RateLimiter) Allow(
@@ -56,6 +95,8 @@ func (l *RateLimiter) Allow(
 		tokenBucketScript,
 		[]string{rateLimitKey(deviceID)},
 		RateLimitInterval.Milliseconds(),
+		l.burst,
+		(RateLimitInterval * time.Duration(l.burst)).Milliseconds(),
 	).Result()
 	if err != nil {
 		return usecase.RateLimitDecision{}, err
@@ -70,14 +111,14 @@ func (l *RateLimiter) Allow(
 	if err != nil {
 		return usecase.RateLimitDecision{}, err
 	}
-	retryAfterSeconds, err := redisInteger(values[1])
+	retryAfterMilliseconds, err := redisInteger(values[1])
 	if err != nil {
 		return usecase.RateLimitDecision{}, err
 	}
 
 	return usecase.RateLimitDecision{
 		Allowed:    allowed == 1,
-		RetryAfter: time.Duration(retryAfterSeconds) * time.Second,
+		RetryAfter: time.Duration(retryAfterMilliseconds) * time.Millisecond,
 	}, nil
 }
 
