@@ -7,4 +7,9 @@ coverage.out
 MYREADME.md
 .gocache/
 
+/results/*.json
+/results/*.jsonl
+/results/*.tmp
+!/results/.gitkeep
+
 .DS_Store

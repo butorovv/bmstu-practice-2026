@@ -194,11 +194,35 @@ Retention: 30 дней.
 
 # Generator
 
--   измерение каждые 5 секунд;
--   отправка каждые 5 секунд;
--   обычный batch = 1 измерение;
--   offline -\> локальный буфер;
--   после восстановления сети отправка batch до 10 измерений.
+-   отдельная утилита `cmd/generator` и Compose profile `load`;
+-   endpoint внутри Compose: `POST http://ingestion:8080/api/v1/telemetry`;
+-   режимы: `normal`, `high-heart-rate`, `mixed`, `duplicate`,
+    `ramp-up`, `spike`, `soak`, `chaos-ready`;
+-   каждое активное устройство создаёт измерение каждые 5 секунд;
+-   обычный batch = 1 измерение, `batch_id` уникален между запусками;
+-   `patient_id` стабилен для устройства;
+-   рост RPS достигается числом устройств, а не уменьшением интервала
+    одного устройства;
+-   в режиме `duplicate` тот же `device_id + batch_id` отправляется повторно;
+-   при `429` учитывается `Retry-After`, при `503` и сетевой ошибке
+    используется retry с exponential backoff;
+-   неотправленные измерения остаются в локальном in-memory буфере;
+-   после восстановления связи буфер отправляется batch-ами до 10 измерений;
+-   результат запуска сохраняется в JSON, принятые `batch_id` и `event_id` —
+    в соседний JSONL-файл.
+
+Основные CLI/ENV параметры:
+
+-   `--target-url` / `GENERATOR_TARGET_URL`;
+-   `--mode` / `GENERATOR_MODE`;
+-   `--devices` / `GENERATOR_DEVICES`;
+-   `--patients` / `GENERATOR_PATIENTS`;
+-   `--duration` / `GENERATOR_DURATION`;
+-   `--batch-size` / `GENERATOR_BATCH_SIZE`;
+-   `--max-batch-size` / `GENERATOR_MAX_BATCH_SIZE`;
+-   `--base-interval` / `GENERATOR_BASE_INTERVAL`;
+-   `--rps-limit` / `GENERATOR_RPS_LIMIT`;
+-   `--output` / `GENERATOR_OUTPUT`.
 
 ------------------------------------------------------------------------
 
