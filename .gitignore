@@ -4,6 +4,8 @@
 *.test
 coverage.out
 
+README.md
+!tests/e2e/README.md
 MYREADME.md
 .gocache/
 
