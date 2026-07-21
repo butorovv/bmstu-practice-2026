@@ -33,6 +33,7 @@ type KafkaPublisher struct {
 	writer         messageWriter
 	publishTimeout time.Duration
 	inFlight       chan struct{}
+	readinessCheck func(context.Context) error
 }
 
 func NewKafkaPublisher(brokers []string, publishTimeout time.Duration) (*KafkaPublisher, error) {
@@ -77,7 +78,9 @@ func NewKafkaPublisherWithConfig(cfg KafkaPublisherConfig) (*KafkaPublisher, err
 		AllowAutoTopicCreation: false,
 	}
 
-	return newKafkaPublisher(writer, publishTimeout, maxInFlight), nil
+	publisher := newKafkaPublisher(writer, publishTimeout, maxInFlight)
+	publisher.readinessCheck = kafkaReadinessCheck(brokers)
+	return publisher, nil
 }
 
 func newKafkaPublisher(writer messageWriter, publishTimeout time.Duration, maxInFlight ...int) *KafkaPublisher {
@@ -129,4 +132,42 @@ func (p *KafkaPublisher) release() {
 
 func (p *KafkaPublisher) Close() error {
 	return p.writer.Close()
+}
+
+func (p *KafkaPublisher) Ready(ctx context.Context) error {
+	if p.readinessCheck == nil {
+		return nil
+	}
+
+	return p.readinessCheck(ctx)
+}
+
+func kafkaReadinessCheck(brokers []string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		var dialErrors []error
+		for _, broker := range brokers {
+			conn, err := (&kafka.Dialer{}).DialLeader(
+				ctx,
+				"tcp",
+				broker,
+				TelemetryRawTopic,
+				0,
+			)
+			if err != nil {
+				dialErrors = append(dialErrors, fmt.Errorf("broker %s: %w", broker, err))
+				continue
+			}
+
+			if err := conn.Close(); err != nil {
+				return fmt.Errorf("close Kafka readiness connection: %w", err)
+			}
+			return nil
+		}
+
+		return fmt.Errorf(
+			"Kafka topic %s is unavailable: %w",
+			TelemetryRawTopic,
+			errors.Join(dialErrors...),
+		)
+	}
 }

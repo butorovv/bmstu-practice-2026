@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/storage"
 )
@@ -34,6 +35,30 @@ func TestHealthReturnsOK(t *testing.T) {
 	}
 	if response.Service != "processing" {
 		t.Fatalf("response service = %q, want %q", response.Service, "processing")
+	}
+}
+
+func TestMetricsEndpointReturnsPrometheusText(t *testing.T) {
+	registry := metrics.NewRegistry()
+	registry.IncCounter("processing_kafka_messages_total", metrics.Labels{"status": "processed"})
+	router := NewRouter(
+		NewHandler(storage.NewInMemoryTelemetryRepository(), storage.NewInMemoryAlertRepository()),
+		registry.Handler(),
+	)
+
+	req := httptest.NewRequest(nethttp.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, nethttp.StatusOK)
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain", contentType)
+	}
+	if !strings.Contains(rec.Body.String(), `processing_kafka_messages_total{status="processed"} 1`) {
+		t.Fatalf("metrics body does not contain processed counter:\n%s", rec.Body.String())
 	}
 }
 

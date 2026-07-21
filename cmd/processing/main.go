@@ -13,6 +13,7 @@ import (
 	processinghttp "github.com/butorovv/bmstu-practice-2026/internal/processing/delivery/http"
 	processingkafka "github.com/butorovv/bmstu-practice-2026/internal/processing/delivery/kafka"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/detector"
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	postgresrepo "github.com/butorovv/bmstu-practice-2026/internal/processing/repository/postgres"
 	redisrepo "github.com/butorovv/bmstu-practice-2026/internal/processing/repository/redis"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/usecase"
@@ -49,30 +50,33 @@ func main() {
 		log.Fatalf("failed to migrate postgres: %v", err)
 	}
 
-	telemetryRepo := postgresrepo.NewTelemetryRepository(postgresPool)
-	alertRepo := postgresrepo.NewAlertRepository(postgresPool)
+	metricsRegistry := metrics.NewRegistry()
+	telemetryRepo := postgresrepo.NewTelemetryRepository(postgresPool, metricsRegistry)
+	alertRepo := postgresrepo.NewAlertRepository(postgresPool, metricsRegistry)
 	cleanupRepo := postgresrepo.NewCleanupRepository(postgresPool)
-	windowRepo := redisrepo.NewSlidingWindowRepository(redisClient, cfg.WindowTTL)
-	deduplicator := redisrepo.NewAlertDeduplicator(redisClient, cfg.AlertDedupTTL)
-	service := usecase.NewProcessingService(
+	windowRepo := redisrepo.NewSlidingWindowRepository(redisClient, cfg.WindowTTL, metricsRegistry)
+	deduplicator := redisrepo.NewAlertDeduplicator(redisClient, cfg.AlertDedupTTL, metricsRegistry)
+	service := usecase.NewProcessingServiceWithMetrics(
 		telemetryRepo,
 		alertRepo,
 		detector.New(),
 		windowRepo,
 		deduplicator,
+		metricsRegistry,
 		cfg.AlertDedupTTL,
 	)
 
 	handler := processinghttp.NewHandler(telemetryRepo, alertRepo)
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: processinghttp.NewRouter(handler),
+		Handler: processinghttp.NewRouter(handler, metricsRegistry.Handler()),
 	}
 	consumer := processingkafka.NewConsumer(processingkafka.ConsumerConfig{
 		Brokers:  cfg.Kafka.Brokers,
 		Topic:    cfg.Kafka.TelemetryTopic,
 		DLQTopic: cfg.Kafka.DLQTopic,
 		GroupID:  cfg.Kafka.ConsumerGroup,
+		Metrics:  metricsRegistry,
 	}, processingkafka.NewMessageHandler(service), log.Default())
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

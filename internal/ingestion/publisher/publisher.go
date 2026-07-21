@@ -2,8 +2,7 @@ package publisher
 
 import (
 	"context"
-	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/butorovv/bmstu-practice-2026/internal/ingestion/usecase"
 )
@@ -29,11 +28,12 @@ func (LogPublisher) Publish(ctx context.Context, event TelemetryEvent) error {
 	default:
 	}
 
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("published topic=%s key=%s event=%s", TelemetryRawTopic, event.PatientID, payload)
+	slog.InfoContext(
+		ctx,
+		"telemetry event published",
+		"topic", TelemetryRawTopic,
+		"event_id", event.EventID,
+		"device_id", event.DeviceID,
+	)
 	return nil
 }

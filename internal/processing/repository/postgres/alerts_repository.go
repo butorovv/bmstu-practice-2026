@@ -7,23 +7,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/usecase"
 )
 
 type AlertRepository struct {
-	db executor
+	db      executor
+	metrics metrics.Recorder
 }
 
 const alertDedupWindow = 5 * time.Minute
 
 var _ usecase.AlertRepository = (*AlertRepository)(nil)
 
-func NewAlertRepository(db executor) *AlertRepository {
-	return &AlertRepository{db: db}
+func NewAlertRepository(db executor, recorders ...metrics.Recorder) *AlertRepository {
+	var recorder metrics.Recorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+
+	return &AlertRepository{
+		db:      db,
+		metrics: recorder,
+	}
 }
 
 func (r *AlertRepository) SaveAlert(ctx context.Context, alert model.Alert) error {
+	startedAt := time.Now()
 	_, err := r.db.Exec(
 		ctx,
 		`INSERT INTO alerts (
@@ -38,6 +49,7 @@ func (r *AlertRepository) SaveAlert(ctx context.Context, alert model.Alert) erro
 		alertDedupKey(alert),
 		alert.TriggeredAt,
 	)
+	r.observeWrite("save_alert", time.Since(startedAt))
 
 	return err
 }
@@ -136,4 +148,16 @@ func alertMessage(alertType string) string {
 func alertDedupKey(alert model.Alert) string {
 	bucket := alert.TriggeredAt.UTC().Unix() / int64(alertDedupWindow.Seconds())
 	return fmt.Sprintf("%s:%s:%d", alert.PatientID, alert.Type, bucket)
+}
+
+func (r *AlertRepository) observeWrite(operation string, duration time.Duration) {
+	if r.metrics == nil {
+		return
+	}
+
+	r.metrics.ObserveHistogram(
+		"processing_postgres_write_duration_seconds",
+		metrics.Labels{"operation": operation},
+		duration.Seconds(),
+	)
 }

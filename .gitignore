@@ -5,4 +5,13 @@
 coverage.out
 
 README.md
+!tests/e2e/README.md
+MYREADME.md
 .gocache/
+
+/results/*.json
+/results/*.jsonl
+/results/*.tmp
+!/results/.gitkeep
+
+.DS_Store

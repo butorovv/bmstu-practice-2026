@@ -1,14 +1,17 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/butorovv/bmstu-practice-2026/internal/processing/metrics"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/model"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/usecase"
 	"github.com/butorovv/bmstu-practice-2026/internal/processing/validator"
@@ -58,6 +61,51 @@ func TestConsumerDoesNotCommitOffsetWhenProcessingFails(t *testing.T) {
 	}
 }
 
+func TestConsumerRecordsProcessedCommitAndLagMetrics(t *testing.T) {
+	registry := metrics.NewRegistry()
+	reader := &fakeMessageReader{}
+	processor := &spyProcessor{
+		result: &usecase.ProcessingResult{
+			Event: model.TelemetryEvent{
+				EventID:   "event-001",
+				DeviceID:  "device-001",
+				PatientID: "patient-001",
+				Timestamp: time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC),
+				HeartRate: 78,
+			},
+		},
+	}
+	consumer := newConsumerWithReader(
+		reader,
+		NewMessageHandler(processor),
+		log.New(io.Discard, "", 0),
+		time.Millisecond,
+	)
+	consumer.metrics = registry
+
+	err := consumer.handleFetchedMessage(context.Background(), kafkago.Message{
+		Topic:         "telemetry.raw",
+		Partition:     0,
+		Offset:        42,
+		HighWaterMark: 45,
+		Value: []byte(`{
+			"event_id": "event-001",
+			"device_id": "device-001",
+			"patient_id": "patient-001",
+			"timestamp": "2026-07-07T12:00:00Z",
+			"heart_rate": 78
+		}`),
+	})
+	if err != nil {
+		t.Fatalf("handleFetchedMessage() error = %v", err)
+	}
+
+	body := metricsText(t, registry)
+	assertMetricsContain(t, body, `processing_kafka_messages_total{status="processed"} 1`)
+	assertMetricsContain(t, body, `processing_kafka_commits_total{status="success"} 1`)
+	assertMetricsContain(t, body, `processing_kafka_consumer_lag{partition="0",topic="telemetry.raw"} 2`)
+}
+
 func TestConsumerPublishesInvalidJSONToDLQBeforeCommit(t *testing.T) {
 	reader := &fakeMessageReader{}
 	writer := &fakeDLQWriter{}
@@ -96,6 +144,36 @@ func TestConsumerPublishesInvalidJSONToDLQBeforeCommit(t *testing.T) {
 	if dlq.Reason == "" || dlq.PayloadBase64 == "" {
 		t.Fatalf("dlq diagnostic fields are empty: %+v", dlq)
 	}
+}
+
+func TestConsumerRecordsDLQMetrics(t *testing.T) {
+	registry := metrics.NewRegistry()
+	reader := &fakeMessageReader{}
+	writer := &fakeDLQWriter{}
+	consumer := newConsumerWithReader(
+		reader,
+		NewMessageHandler(&cancelingProcessor{}),
+		log.New(io.Discard, "", 0),
+		time.Millisecond,
+	)
+	consumer.dlqWriter = writer
+	consumer.dlqTopic = "telemetry.dlq"
+	consumer.metrics = registry
+
+	err := consumer.handleFetchedMessage(context.Background(), kafkago.Message{
+		Topic:     "telemetry.raw",
+		Partition: 0,
+		Offset:    7,
+		Value:     []byte(`{"invalid"`),
+	})
+	if err != nil {
+		t.Fatalf("handleFetchedMessage() error = %v", err)
+	}
+
+	body := metricsText(t, registry)
+	assertMetricsContain(t, body, `processing_kafka_messages_total{status="dlq"} 1`)
+	assertMetricsContain(t, body, `processing_dlq_messages_total{reason="decode"} 1`)
+	assertMetricsContain(t, body, `processing_errors_total{stage="decode"} 1`)
 }
 
 func TestConsumerDoesNotCommitOffsetWhenDLQPublishFails(t *testing.T) {
@@ -231,4 +309,23 @@ func (p *cancelingProcessor) Process(
 	p.cancel()
 
 	return nil, p.err
+}
+
+func metricsText(t *testing.T, registry *metrics.Registry) string {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	if _, err := registry.WriteTo(&buffer); err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+
+	return buffer.String()
+}
+
+func assertMetricsContain(t *testing.T, body string, want string) {
+	t.Helper()
+
+	if !strings.Contains(body, want) {
+		t.Fatalf("metrics body does not contain %q:\n%s", want, body)
+	}
 }
